@@ -1,2 +1,13 @@
 fastapi
 uvicorn
+# Core & Tools
+requests
+python-dotenv
+
+# Development (Hephaestus)
+pytest
+
+# QA Automation (Artemis)
+robotframework
+robotframework-requests
+robotframework-seleniumlibrary

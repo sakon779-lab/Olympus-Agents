@@ -6,12 +6,11 @@ import os
 import sys
 import shutil
 import time
-import ast
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 
 # Import LLM Client
-from local_agent.llm_client import query_qwen
+from core.llm_client import query_qwen
 
 # ✅ IMPORT 1: Code Analysis Tool (Wrapper จะเรียกใช้ตัวนี้)
 from local_agent.tools.code_analysis import generate_skeleton as original_skeleton

@@ -1,0 +1,6 @@
+CaseID,TestType,Description,PreCondition,Steps,ExpectedResult
+TC-001,Positive,Verify successful response for valid name,"API server is running","1. Send a GET request to /hello/Athena\n2. Observe the response","Status code: 200, Response body: Hello, Athena!"
+TC-002,Negative,Verify error response for empty name,"API server is running","1. Send a GET request to /hello/\n2. Observe the response","Status code: 400, Response body: Name cannot be empty"
+TC-003,Negative,Verify error response for special characters in name,"API server is running","1. Send a GET request to /hello/Athena!\n2. Observe the response","Status code: 400, Response body: Invalid characters in name"
+TC-004,Boundary,Verify response with minimum length name,"API server is running","1. Send a GET request to /hello/a\n2. Observe the response","Status code: 200, Response body: Hello, a!"
+TC-005,Boundary,Verify response with maximum length name,"API server is running","1. Send a GET request to /hello/AthenaAthenaAthenaAthenaAthena\n2. Observe the response","Status code: 200, Response body: Hello, AthenaAthenaAthenaAthenaAthena!"

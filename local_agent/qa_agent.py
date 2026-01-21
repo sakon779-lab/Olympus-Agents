@@ -5,16 +5,15 @@ import subprocess
 import os
 import sys
 import shutil
-import time
 import base64
 import requests
 import ast
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 
 # Import LLM Client
 try:
-    from local_agent.llm_client import query_qwen
+    from core.llm_client import query_qwen
 except ImportError:
     def query_qwen(history):
         print("❌ Error: Missing local_agent.llm_client")
