@@ -1,41 +1,41 @@
 import os
 import logging
 from typing import List, Dict
+
+# ✅ ใช้ Library เดิมที่คุณถนัด (LangChain)
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
 
-# 👇 FIX: ใช้ตำแหน่งของไฟล์นี้ เป็นตัวตั้งต้น แล้วถอยหลังมา 1 step เพื่อหา Project Root
-CURRENT_FILE_PATH = os.path.abspath(__file__) # D:\Project\PaymentBlockChain\knowledge_base\vector_store.py
-BASE_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_PATH)) # D:\Project\PaymentBlockChain
-
-# กำหนดที่เก็บ Vector DB (จะเป็น Folder ชื่อ 'chroma_db' ในโปรเจกต์)
+# Setup Path
+CURRENT_FILE_PATH = os.path.abspath(__file__)
+BASE_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_PATH)) # Olympus-Agents Root
 PERSIST_DIRECTORY = os.path.join(BASE_DIR, "chroma_db")
 
-# ตั้งค่า Embedding Model (ใช้ Ollama: nomic-embed-text)
+# Setup Embeddings (ใช้ Ollama ตามเดิม)
 embeddings = OllamaEmbeddings(
-    model="nomic-embed-text",
+    model="nomic-embed-text",  # ตรวจสอบว่า `ollama pull nomic-embed-text` แล้วนะครับ
     base_url="http://localhost:11434"
 )
 
-# โหลด Vector DB เตรียมใช้งาน
+# Load Vector DB
 vector_db = Chroma(
     collection_name="jira_knowledge",
     embedding_function=embeddings,
     persist_directory=PERSIST_DIRECTORY
 )
 
-# 👇 ฟังก์ชันต้องรับ 3 ค่าแบบนี้ครับ
 def add_ticket_to_vector(issue_key: str, summary: str, content: str):
     """
-    Save ticket data to Vector DB for semantic search.
+    Save ticket data to Vector DB.
+    Content ในที่นี้คือ Business Logic + Tech Spec ที่รวมร่างมาแล้ว
     """
     logging.info(f"🧠 VECTOR: Embedding ticket {issue_key}...")
 
     full_text = f"""
     Ticket: {issue_key}
     Summary: {summary}
-    Details: {content}
+    Knowledge: {content}
     """
 
     doc = Document(
@@ -43,30 +43,35 @@ def add_ticket_to_vector(issue_key: str, summary: str, content: str):
         metadata={"issue_key": issue_key, "source": "jira"}
     )
 
-    # ลบของเก่าก่อนเพิ่มใหม่
+    # ✅ ลบของเก่าก่อนเพิ่มใหม่ (เพื่อไม่ให้ข้อมูลซ้ำซ้อน)
     try:
-        existing = vector_db.get(where={"issue_key": issue_key})
-        if existing and existing['ids']:
-            vector_db.delete(ids=existing['ids'])
+        # ดึง ID เก่าออกมา
+        existing_docs = vector_db.get(where={"issue_key": issue_key})
+        if existing_docs and existing_docs['ids']:
+            vector_db.delete(ids=existing_docs['ids'])
+            logging.info(f"♻️ Updated existing vector for {issue_key}")
     except Exception as e:
-        logging.warning(f"⚠️ Vector delete error (ignorable): {e}")
+        logging.warning(f"⚠️ Vector delete warning: {e}")
 
+    # เพิ่ม Vector ใหม่
     vector_db.add_documents([doc])
     logging.info(f"✅ VECTOR: Saved {issue_key} successfully.")
-
 
 def search_vector_db(query: str, k: int = 4):
     """ค้นหาข้อมูลด้วยความหมาย (Semantic Search)"""
     logging.info(f"🧠 Semantic Searching for: '{query}'")
 
-    # ค้นหา k อันดับที่ใกล้เคียงที่สุด
     results = vector_db.similarity_search_with_score(query, k=k)
+
+    if not results:
+        return "❌ No relevant info found in Vector DB."
 
     parsed_results = []
     for doc, score in results:
         parsed_results.append(f"""
         --- MATCH (Score: {score:.2f}) ---
-        {doc.page_content}
+        Key: {doc.metadata.get('issue_key')}
+        Content: {doc.page_content}
         -----------------------------------
         """)
 

@@ -11,3 +11,13 @@ pytest
 robotframework
 robotframework-requests
 robotframework-seleniumlibrary
+
+sqlalchemy
+chromadb
+sentence-transformers
+
+langchain-chroma
+langchain-ollama
+chromadb
+psycopg2-binary
+pydantic-settings
