@@ -4,110 +4,86 @@ import re
 import os
 import sys
 import subprocess
-import ast
 from typing import Dict, Any, List
 
-# ✅ Core Modules
+# ✅ Core Configuration & LLM
+from core.config import settings
 from core.llm_client import query_qwen
-from core.config import JIRA_URL, JIRA_EMAIL, JIRA_TOKEN
 
-# ✅ Core Tools (Refactored)
-from core.tools.file_ops import read_file, write_file, append_file, list_files
-from core.tools.cmd_ops import run_command
+# ✅ Core Tools
 from core.tools.jira_ops import read_jira_ticket
-from core.tools.git_ops import git_commit, git_push, create_pr, git_setup_workspace
+from core.tools.file_ops import read_file, write_file, append_file, list_files
+from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
-logger = logging.getLogger("HephaestusAgent")
-
-# ==============================================================================
-# 📍 CONFIGURATION
-# ==============================================================================
-AGENT_WORKSPACE = os.getcwd()
-# URL หลักของโปรเจกต์ (ปรับให้ตรงกับ Repo จริงของคุณ)
-MAIN_REPO_URL = "https://github.com/sakon779-lab/payment-blockchain.git"
+logger = logging.getLogger("Hephaestus")
 
 
 # ==============================================================================
-# 🛠️ AGENT SPECIFIC TOOLS
+# 🛠️ HEPHAESTUS SPECIFIC TOOLS (Sandbox Commanders)
 # ==============================================================================
 
-def init_workspace_wrapper(branch_name: str, base_branch: str = "main") -> str:
-    """Wrapper เพื่อเรียก Core Tool โดยส่ง Identity ของ Hephaestus"""
-    logger.info(f"🔥 Setting up Forge (Workspace) for branch: {branch_name}")
-    return git_setup_workspace(
-        repo_url=MAIN_REPO_URL,
-        branch_name=branch_name,
-        base_branch=base_branch,
-        cwd=AGENT_WORKSPACE,
-        git_username="Hephaestus Dev",
-        git_email="hephaestus@olympus.ai"
-    )
+def run_sandbox_command(command: str) -> str:
+    """Executes a shell command inside the Agent's Workspace."""
+    workspace = settings.AGENT_WORKSPACE
 
+    if not os.path.exists(workspace):
+        return f"❌ Error: Workspace not found. Did you run 'git_setup_workspace'?"
 
-def run_unit_test(test_path: str) -> str:
-    """Runs a unit test file using pytest within the workspace."""
+    logger.info(f"⚡ Executing in Sandbox: {command}")
+
     try:
-        full_path = os.path.join(AGENT_WORKSPACE, test_path)
-        if not os.path.exists(full_path):
-            return f"❌ Error: Test file '{test_path}' not found."
-
-        command = [sys.executable, "-m", "pytest", full_path]
-
-        # เพิ่ม PYTHONPATH ให้รู้จัก src/
         env = os.environ.copy()
-        env["PYTHONPATH"] = AGENT_WORKSPACE + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
 
-        logger.info(f"🧪 Running Unit Test: {test_path}...")
         result = subprocess.run(
             command,
-            cwd=AGENT_WORKSPACE,
-            env=env,
+            shell=True,
+            cwd=workspace,
             capture_output=True,
-            text=True
+            text=True,
+            env=env
         )
 
-        output = result.stdout + "\n" + result.stderr
-
+        output = result.stdout + result.stderr
         if result.returncode == 0:
-            return f"✅ TESTS PASSED:\n{output}"
+            return f"✅ Command Success:\n{output.strip()}"
         else:
-            return f"❌ TESTS FAILED:\n{output}\n\n👉 INSTRUCTION: Analyze the error and FIX the source code."
+            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output.strip()}"
 
     except Exception as e:
         return f"❌ Execution Error: {e}"
 
 
-def install_package_wrapper(package_name: str) -> str:
-    """Installs a Python package."""
-    return run_command(f"{sys.executable} -m pip install {package_name}")
-
-
-def git_pull_wrapper(branch_name: str) -> str:
-    """Wrapper for git pull"""
-    return run_command(f"git pull origin {branch_name}")
+def install_package(package_name: str) -> str:
+    """Installs a Python package in the current environment."""
+    # ป้องกัน Command Injection พื้นฐาน
+    if any(char in package_name for char in [";", "&", "|", ">"]):
+        return "❌ Error: Invalid package name."
+    return run_sandbox_command(f"{sys.executable} -m pip install {package_name}")
 
 
 # ==============================================================================
 # 🧩 TOOLS REGISTRY
 # ==============================================================================
 TOOLS = {
-    # Core Tools
+    # Understanding
     "read_jira_ticket": read_jira_ticket,
     "list_files": list_files,
     "read_file": read_file,
-    "write_file": write_file,
-    "append_file": append_file,
+
+    # Workspace & Git
+    "git_setup_workspace": git_setup_workspace,  # (Replaces init_workspace)
     "git_commit": git_commit,
     "git_push": git_push,
     "create_pr": create_pr,
 
-    # Hephaestus Specific
-    "init_workspace": init_workspace_wrapper,
-    "run_unit_test": run_unit_test,
-    "install_package": install_package_wrapper,
-    "git_pull": git_pull_wrapper
+    # Coding & Testing
+    "write_file": write_file,
+    "append_file": append_file,  # ✅ Added
+    "run_command": run_sandbox_command,  # (Replaces run_unit_test with general command)
+    "install_package": install_package
 }
 
 
@@ -121,13 +97,11 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Hephaestus - Ultimate Edition + Content Detachment)
+# 🧠 SYSTEM PROMPT (MERGED VERSION)
 # ==============================================================================
-# เราใช้ Prompt ของคุณเป็นแกนหลัก แต่เติม "Content Detachment"
-# เพื่อให้ Python Code (extract_code_block) ทำงานได้ถูกต้องครับ
 SYSTEM_PROMPT = """
-You are "Hephaestus", an Autonomous AI Developer.
-Your goal is to complete Jira tasks, Verify with Tests, and Submit a PR.
+You are "Hephaestus", the Senior Python Developer of Olympus.
+Your goal is to complete Jira tasks, Verify with Tests, and Submit a PR in a Sandbox Environment.
 
 *** CRITICAL: ATOMICITY & OUTPUT FORMAT ***
 1. **ONE ACTION PER TURN**: Strictly ONE JSON block per response.
@@ -135,61 +109,56 @@ Your goal is to complete Jira tasks, Verify with Tests, and Submit a PR.
 3. **STOP IMMEDIATELY**: Stop generation after `}`.
 
 *** CODING STANDARDS (STRICT) ***
-1. **FOLLOW REQUIREMENTS**: Implement EXACTLY what the Jira ticket asks. DO NOT invent new logic or "Hello World" examples.
-2. **FILE STRUCTURE**: Source in `src/`, Tests in `tests/`.
+1. **FOLLOW REQUIREMENTS**: Implement EXACTLY what the Jira ticket asks. DO NOT invent new logic or "Hello World" examples unless asked.
+2. **FILE STRUCTURE**: Source code in `src/`, Tests in `tests/`.
 3. **IMPORTS**: Use absolute imports (e.g., `from src.main import app`).
+4. **STYLE**: Follow PEP8.
 
 *** WORKFLOW (EXECUTE IN ORDER) ***
 1. **UNDERSTAND**: 
    - Call `read_jira_ticket(issue_key)`.
-   - **LOCK TARGET**: Memorize the requirements. DO NOT look for other tickets.
+   - **LOCK TARGET**: Memorize requirements.
 
-2. **PLAN**: 
-   - Decide which files to create/edit based strictly on Step 1.
+2. **INIT WORKSPACE**: 
+   - Call `git_setup_workspace(issue_key)`.
+   - This will clone the repo and checkout `feature/{issue_key}`.
 
-3. **INIT**: `init_workspace(branch_name)`.
-   - Use a branch name relevant to the ticket (e.g., `feature/SCRUM-24-api`).
-   - **CONSISTENCY**: Use this SAME branch name for all future Git operations.
+3. **PLAN & EXPLORE**: 
+   - Call `list_files` to check structure.
+   - Decide which files to create/edit.
 
 4. **CODE & TEST**: 
    - `write_file` (Source) -> `write_file` (Tests).
-   - `run_unit_test` -> Fix if failed.
+   - `run_command("pytest tests/")`.
+   - 🛑 IF TESTS FAIL: Analyze error, Fix code, Re-run tests.
 
 5. **DELIVERY**:
    - `git_commit` (Only if tests pass).
-   - `git_push(branch_name)` (Must match Step 3).
+   - `git_push(branch_name)` (Use the branch from Setup).
    - `create_pr`.
    - `task_complete`.
 
 *** ERROR HANDLING ***
-- **Missing Module**: If `ModuleNotFoundError`, check:
-  - External Lib? -> `install_package`.
+- **Missing Module**: If `ModuleNotFoundError`:
+  - External Lib? -> `install_package(name)`.
   - Internal Code? -> Create the missing file.
-- **Git Nothing to Commit**: It means code is saved. Proceed to `git_push`.
+- **Git Nothing to Commit**: It means code is already saved. Proceed to `git_push`.
 
-*** ⚡ CONTENT DETACHMENT (CRITICAL FOR FILES) ***
-When using `write_file` or `append_file`, DO NOT put the code inside JSON.
-1. Output the JSON Action first.
-2. Immediately follow it with a **Markdown Code Block** containing the actual content.
+*** 🛠️ TOOLS AVAILABLE ***
+- read_jira_ticket(issue_key)
+- git_setup_workspace(issue_key) -> Returns branch name
+- list_files(directory)
+- read_file(file_path)
+- write_file(file_path, content)
+- append_file(file_path, content)
+- run_command(command) -> Use for "pytest" or "ls"
+- install_package(package_name)
+- git_commit(message)
+- git_push(branch_name)
+- create_pr(title, body, branch)
+- task_complete(summary)
 
-**Format Example:**
-[JSON Action]
-{ "action": "write_file", "args": { "file_path": "src/main.py" } }
-
-[File Content]
-""" + "```" + """python
-def main():
-    print("Hello from Hephaestus!")
-""" + "```" + """
-
-TOOLS AVAILABLE:
-read_jira_ticket(issue_key), init_workspace(branch_name), list_files(directory),
-read_file(file_path), write_file(file_path), append_file(file_path),
-run_unit_test(test_path), git_commit(message), git_push(branch_name),
-git_pull(branch_name), create_pr(title, body), task_complete(summary),
-install_package(package_name)
-
-RESPONSE FORMAT (JSON ONLY + CODE BLOCK):
+RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """
 
@@ -198,13 +167,9 @@ RESPONSE FORMAT (JSON ONLY + CODE BLOCK):
 # 🧩 HELPER: PARSERS
 # ==============================================================================
 def extract_code_block(text: str) -> str:
-    matches = re.findall(r"```\w*\n(.*?)```", text, re.DOTALL)
+    matches = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     if not matches: return ""
-    for content in reversed(matches):
-        cleaned = content.strip()
-        if not ('"action":' in cleaned and '"args":' in cleaned):
-            return cleaned
-    return ""
+    return max(matches, key=len).strip()
 
 
 def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
@@ -222,52 +187,43 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
             pos = end_index
         except:
             pos += 1
-
-    if not results:
-        # Fallback for Python dict strings
-        try:
-            matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
-            for match in matches:
-                try:
-                    clean = match.replace("true", "True").replace("false", "False").replace("null", "None")
-                    obj = ast.literal_eval(clean)
-                    if isinstance(obj, dict) and "action" in obj: results.append(obj)
-                except:
-                    continue
-        except:
-            pass
     return results
 
 
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task_description: str, max_steps: int = 30) -> str:
-    logger.info(f"🚀 Starting Dev Task (Hephaestus): {task_description}")
+def run_hephaestus_task(task: str, max_steps: int = 30):
+    print(f"🔨 Launching Hephaestus (The Builder)...")
+    print(f"🆔 Identity: {settings.CURRENT_AGENT_NAME}")
+    print(f"📂 Workspace: {settings.AGENT_WORKSPACE}")
+    print(f"📋 Task: {task}")
 
     history = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Task: {task_description}"}
+        {"role": "user", "content": task}
     ]
 
     for step in range(max_steps):
-        logger.info(f"🔄 Step {step + 1}/{max_steps}...")
-
+        print(f"\n🔄 Thinking (Step {step + 1})...")
         try:
             response = query_qwen(history)
-            content = str(response.get('message', {}).get('content', ''))
+
+            if isinstance(response, dict):
+                content = response.get('message', {}).get('content', '') or response.get('content', '')
+            else:
+                content = str(response)
+
         except Exception as e:
-            logger.error(f"❌ LLM Error: {e}")
-            return f"LLM Error: {e}"
+            print(f"❌ Error querying LLM: {e}")
+            return
 
         print(f"🤖 Hephaestus: {content[:100]}...")
 
         tool_calls = _extract_all_jsons(content)
 
         if not tool_calls:
-            logger.warning("No valid JSON found.")
             history.append({"role": "assistant", "content": content})
-            history.append({"role": "user", "content": "System: Please output a valid JSON Action."})
             continue
 
         step_outputs = []
@@ -287,30 +243,32 @@ def run_hephaestus_task(task_description: str, max_steps: int = 30) -> str:
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # Handle File Content from Markdown
+            # Content Detachment Logic
             if action in ["write_file", "append_file"]:
-                code_content = extract_code_block(content)
-                if code_content:
-                    args["content"] = code_content
-                elif "content" not in args:
-                    step_outputs.append("❌ Error: Content missing in Markdown block.")
-                    continue
+                if "content" not in args or len(args["content"]) < 10:
+                    code_content = extract_code_block(content)
+                    if code_content:
+                        args["content"] = code_content
+                        print("📝 Extracted content from Markdown block.")
 
-            logger.info(f"🔧 Executing: {action}")
+            print(f"🔧 Executing: {action}")
             result = execute_tool_dynamic(action, args)
-            step_outputs.append(f"Tool Output ({action}):\n{result}")
 
-            # Safety break
-            if action == "init_workspace" and "❌" in result:
-                return f"FAILED: {result}"
+            display_result = result
+            if action in ["write_file", "append_file"] and "Error" not in result:
+                display_result = f"✅ File operation success: {args.get('file_path')}"
 
-            break  # Strict Atomicity
+            print(
+                f"📄 Result: {display_result[:300]}..." if len(display_result) > 300 else f"📄 Result: {display_result}")
+            step_outputs.append(f"Tool Output ({action}): {result}")
+
+            break
 
         if task_finished:
-            print(f"\n✅ TASK COMPLETED: {result}")
+            print(f"\n✅ BUILD COMPLETE: {result}")
             return result
 
         history.append({"role": "assistant", "content": content})
         history.append({"role": "user", "content": "\n".join(step_outputs)})
 
-    return "❌ FAILED: Max steps reached."
+    print("❌ FAILED: Max steps reached.")

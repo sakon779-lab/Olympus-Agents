@@ -1,35 +1,51 @@
 import requests
-import base64
-import json
+from requests.auth import HTTPBasicAuth
 import logging
-from core.config import JIRA_URL, JIRA_EMAIL, JIRA_TOKEN
+# ✅ เปลี่ยนตรงนี้: Import settings object แทนตัวแปรแยก
+from core.config import settings
 
+# Setup Logger
 logger = logging.getLogger("JiraOps")
 
 
 def read_jira_ticket(issue_key: str) -> str:
-    """อ่านข้อมูล Requirement จาก Jira (Centralized)"""
-    # logger.info(f"🔍 Reading Requirement: {issue_key}...")
-
-    if not JIRA_EMAIL or not JIRA_TOKEN:
-        return "⚠️ Jira Config Missing! Please interpret requirements from user input."
-
-    url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}"
-    auth_str = f"{JIRA_EMAIL}:{JIRA_TOKEN}"
-    auth_base64 = base64.b64encode(auth_str.encode()).decode()
-    headers = {"Authorization": f"Basic {auth_base64}", "Accept": "application/json"}
+    """
+    Fetches details of a Jira ticket.
+    Args:
+        issue_key (str): The Jira ticket ID (e.g., SCRUM-26).
+    Returns:
+        str: Formatted ticket details.
+    """
+    # ✅ ใช้ settings.JIRA_... แทน
+    url = f"{settings.JIRA_URL}/rest/api/3/issue/{issue_key}"
+    auth = HTTPBasicAuth(settings.JIRA_EMAIL, settings.JIRA_API_TOKEN)
+    headers = {
+        "Accept": "application/json"
+    }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, auth=auth)
+
         if response.status_code == 200:
             data = response.json()
             fields = data.get('fields', {})
-            summary = fields.get('summary', 'No Summary')
-            description = fields.get('description', 'No Description')
 
-            # แปลง Description object ให้เป็น String
-            desc_text = json.dumps(description)
-            return f"TICKET: {issue_key}\nSUMMARY: {summary}\nREQUIREMENTS: {desc_text}"
-        return f"❌ Ticket {issue_key} not found."
+            summary = fields.get('summary', 'No Summary')
+            description_adf = fields.get('description', {})
+
+            # Simple ADF text extraction (เหมือนเดิม)
+            description_text = "No Description"
+            if description_adf:
+                description_text = str(description_adf)
+
+            result = (
+                f"TICKET: {issue_key}\n"
+                f"SUMMARY: {summary}\n"
+                f"REQUIREMENTS: {description_text}"
+            )
+            return result
+        else:
+            return f"❌ Error: Failed to fetch {issue_key}. Status: {response.status_code} - {response.text}"
+
     except Exception as e:
-        return f"❌ Connection Error: {e}"
+        return f"❌ Exception: {e}"
