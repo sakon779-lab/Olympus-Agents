@@ -1,15 +1,18 @@
 import sys
 import os
 
-# เพิ่ม Current Dir ให้ Python หา agents/core เจอ
+# 1. Setup Path
 sys.path.append(os.getcwd())
 
-# ✅ แก้ชื่อ import ให้ตรงกับในไฟล์ agent.py (จาก run_athena เป็น run_athena_task)
+# 2. ✅ Force Identity BEFORE importing agent
+from core.config import settings
+settings.CURRENT_AGENT_NAME = "Athena"
+
+# 3. Import Agent
 from agents.athena.agent import run_athena_task
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python run_athena.py \"Design test cases for SCRUM-XX\"")
+        print("Usage: python run_athena.py \"Task description\"")
     else:
-        # ✅ เรียกใช้ฟังก์ชันชื่อใหม่
         run_athena_task(sys.argv[1])

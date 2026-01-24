@@ -6,54 +6,56 @@ import sys
 import ast
 from typing import Dict, Any, List
 
-# ✅ Core Modules
+# ✅ Core Configuration & LLM
+from core.config import settings
 from core.llm_client import query_qwen
-from core.config import TEST_DESIGN_DIR
 
-# ✅ Core Tools (Import จากส่วนกลาง)
+# ✅ Core Tools
 from core.tools.jira_ops import read_jira_ticket
+from core.tools.file_ops import read_file, list_files
+from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Athena] %(message)s')
-logger = logging.getLogger("AthenaAgent")
+logger = logging.getLogger("Athena")
 
 
 # ==============================================================================
-# 🛠️ AGENT SPECIFIC TOOLS (Athena Skills)
+# 🛠️ AGENT SPECIFIC TOOLS
 # ==============================================================================
 
 def save_test_design(filename: str, content: str) -> str:
-    """
-    บันทึก Test Scenarios (CSV) ลงในโฟลเดอร์กลาง (test_designs)
-    หมายเหตุ: ฟังก์ชันนี้เฉพาะตัวของ Athena เพราะต้องจัดการเรื่อง path และนามสกุลไฟล์ CSV
-    """
+    """Saves Test Scenarios (CSV) to the QA Repo."""
     try:
-        # Ensure extension
-        if not filename.endswith('.csv'):
-            filename += ".csv"
-
-        # Save to centralized folder (TEST_DESIGN_DIR from core.config)
-        full_path = os.path.join(TEST_DESIGN_DIR, filename)
-
-        # Create dir if not exists (Safety check)
+        if not filename.endswith('.csv'): filename += ".csv"
+        target_dir = settings.TEST_DESIGN_DIR
+        full_path = os.path.join(target_dir, filename)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
-        # Clean Markdown Code Block (ลบ ```csv และ ``` ออก)
-        # รองรับทั้ง ```csv และ ``` เฉยๆ
+        # Clean logic: Remove markdown code blocks
         clean_content = content.replace("```csv", "").replace("```", "").strip()
 
+        # Remove empty lines
+        lines = [line for line in clean_content.splitlines() if line.strip()]
+        final_content = "\n".join(lines)
+
         with open(full_path, "w", encoding="utf-8", newline='') as f:
-            f.write(clean_content)
+            f.write(final_content)
 
         return f"✅ Test Design Saved: {full_path}"
     except Exception as e:
         return f"❌ Error Saving CSV: {e}"
 
 
-# 📋 Tools Registry
 TOOLS = {
-    "read_jira_ticket": read_jira_ticket,  # ✅ ใช้ของ Core
-    "save_test_design": save_test_design  # ✅ ใช้ของ Local
+    "read_jira_ticket": read_jira_ticket,
+    "list_files": list_files,
+    "read_file": read_file,
+    "git_setup_workspace": git_setup_workspace,
+    "git_commit": git_commit,
+    "git_push": git_push,
+    "create_pr": create_pr,
+    "save_test_design": save_test_design
 }
 
 
@@ -67,78 +69,71 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Athena - Ultimate Edition + Content Detachment)
+# 🧠 SYSTEM PROMPT (Strict Signature & Detachment)
 # ==============================================================================
-SYSTEM_PROMPT = """
-You are "Athena", a Senior QA Lead & Test Architect.
-Your goal is to design comprehensive Test Cases based on Jira Requirements.
+# ใช้ตัวแปรนี้เพื่อไม่ให้ Chat UI สับสนกับ Code Block
+CSV_BLOCK_START = "```" + "csv"
+CSV_BLOCK_END = "```"
 
-*** 🚫 ROLE CONSTRAINTS ***
-1. **NO CODING**: You do NOT write Robot Framework code. You write English Test Cases.
-2. **OUTPUT**: You ONLY produce CSV files (Test Matrices).
+SYSTEM_PROMPT = f"""
+You are "Athena", the Senior QA Lead.
+Your goal is to design Data-Driven Test Cases (CSV) based on Jira Requirements.
 
-*** 🧠 TEST DESIGN STRATEGY ***
-1. **Analyze**: Read the Jira ticket deeply. Understand the Business Logic.
-2. **Design**: Apply testing techniques:
-   - **Positive Cases**: Happy paths (Success scenarios).
-   - **Negative Cases**: Error handling, Validation checks (Fail scenarios).
-   - **Boundary Analysis**: Min/Max values.
-   - **Security**: Auth checks (if applicable).
-3. **Format**: Create a CSV with these exact headers:
-   `CaseID, TestType, Description, PreCondition, Steps, ExpectedResult`
+*** 🛠️ TOOL SIGNATURES (STRICT) ***
+You MUST use these exact argument names:
+1. `read_jira_ticket(issue_key)`
+2. `git_setup_workspace(issue_key)`
+3. `save_test_design(filename, content)`
+4. `git_commit(message)`
+5. `git_push(branch_name)`
+6. `create_pr(title, body)`
 
-*** ⚡ WORKFLOW (AUTONOMOUS) ***
-If user says "Design for SCRUM-24", you MUST:
-1. Call `read_jira_ticket("SCRUM-24")`.
-2. Think and generate the CSV content.
-3. Call `save_test_design` with filename "SCRUM-24.csv".
-4. Call `task_complete`.
+*** ⚡ CONTENT DELIVERY RULE (CRITICAL) ***
+When calling `save_test_design`, do NOT put the CSV inside the JSON.
+Instead, output a Markdown Code Block tagged with `csv` AFTER the JSON.
 
-*** CRITICAL: ATOMICITY ***
-1. **ONE ACTION PER TURN**: Strictly ONE JSON block per response.
-2. **NO CHAINING**: Wait for the tool result.
-3. **STOP**: Stop after `}`.
+**CORRECT FORMAT:**
+{{ "action": "save_test_design", "args": {{ "filename": "SCRUM-26.csv" }} }}
 
-*** ⚡ CONTENT DETACHMENT (CRITICAL FOR CSV) ***
-When using `save_test_design`, DO NOT put the CSV content inside the JSON `args`.
-1. Output the JSON Action first.
-2. Immediately follow it with a **Markdown Code Block** containing the actual CSV content.
+{CSV_BLOCK_START}
+CaseID, TestType, Description, PreRequisites, Steps, ExpectedResult
+TC-001, Positive, Verify API, Mock: None, Call GET /api, 200 OK
+{CSV_BLOCK_END}
 
-**Format Example:**
-[JSON Action]
-{ "action": "save_test_design", "args": { "filename": "SCRUM-24.csv" } }
+*** ⚡ WORKFLOW (STRICT ORDER) ***
+1. `read_jira_ticket` -> Wait for result.
+2. `git_setup_workspace` -> Wait for result.
+3. `save_test_design` (MUST include CSV block) -> Wait for result.
+4. `git_commit` -> Wait for result.
+5. `git_push` -> Wait for result.
+6. `create_pr` -> Wait for result.
+7. `task_complete`.
 
-[File Content]
-""" + "```" + """csv
-CaseID, TestType, Description, ...
-TC-001, Positive, Verify login success, ...
-""" + "```" + """
-
-TOOLS AVAILABLE:
-read_jira_ticket(issue_key), save_test_design(filename), task_complete(summary)
-
-RESPONSE FORMAT (JSON ONLY + CODE BLOCK):
-{ "action": "tool_name", "args": { ... } }
+RESPONSE FORMAT (JSON ONLY + MARKDOWN BLOCK):
+{{ "action": "tool_name", "args": {{ ... }} }}
 """
 
 
 # ==============================================================================
-# 🧩 HELPER: PARSERS (Standardized with Hephaestus)
+# 🧩 HELPER: ROBUST PARSERS
 # ==============================================================================
 def extract_code_block(text: str) -> str:
-    """ดึง Content จาก Markdown block สุดท้ายที่ไม่ใช่ JSON"""
-    matches = re.findall(r"```\w*\n(.*?)```", text, re.DOTALL)
-    if not matches: return ""
+    """Extract CSV content precisely."""
+    # 1. Look for explicit CSV tag
+    csv_matches = re.findall(r"```csv\n(.*?)```", text, re.DOTALL)
+    if csv_matches:
+        return csv_matches[-1].strip()
+
+    # 2. Fallback: Find any non-JSON block
+    matches = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     for content in reversed(matches):
         cleaned = content.strip()
-        # เช็คว่าไม่ใช่ JSON Action
-        if not ('"action":' in cleaned and '"args":' in cleaned):
+        if not (cleaned.startswith("{") and "action" in cleaned):
             return cleaned
     return ""
 
 
 def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
-    """ดึง JSON Action อย่างแม่นยำ (รองรับ Python dict string ด้วย)"""
     results = []
     decoder = json.JSONDecoder()
     pos = 0
@@ -153,28 +148,21 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
             pos = end_index
         except:
             pos += 1
-
-    if not results:
-        # Fallback for Python dict strings
-        try:
-            matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
-            for match in matches:
-                try:
-                    clean = match.replace("true", "True").replace("false", "False").replace("null", "None")
-                    obj = ast.literal_eval(clean)
-                    if isinstance(obj, dict) and "action" in obj: results.append(obj)
-                except:
-                    continue
-        except:
-            pass
     return results
 
 
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_athena_task(task: str, max_steps: int = 10):
-    print(f"🏛️ Launching Athena (Test Designer)...")
+def run_athena_task(task: str, max_steps: int = 20):
+    # Enforce Identity
+    if settings.CURRENT_AGENT_NAME != "Athena":
+        print(f"⚠️ Switching Identity to 'Athena'...")
+        settings.CURRENT_AGENT_NAME = "Athena"
+
+    print(f"🦉 Launching Athena (Test Architect)...")
+    print(f"🆔 Identity: {settings.CURRENT_AGENT_NAME}")
+    print(f"📂 Workspace: {settings.AGENT_WORKSPACE}")
     print(f"📋 Task: {task}")
 
     history = [
@@ -185,15 +173,11 @@ def run_athena_task(task: str, max_steps: int = 10):
     for step in range(max_steps):
         print(f"\n🔄 Thinking (Step {step + 1})...")
         try:
-            # 1. เรียก LLM
             response = query_qwen(history)
-
-            # ✅ 2. (FIX) Handle Response Type (Dict vs String)
             if isinstance(response, dict):
                 content = response.get('message', {}).get('content', '') or response.get('content', '')
             else:
                 content = str(response)
-
         except Exception as e:
             print(f"❌ Error querying LLM: {e}")
             return
@@ -203,7 +187,6 @@ def run_athena_task(task: str, max_steps: int = 10):
         tool_calls = _extract_all_jsons(content)
 
         if not tool_calls:
-            # Fallback for thought-only responses
             if "complete" in content.lower():
                 print("ℹ️ Athena finished thinking.")
             history.append({"role": "assistant", "content": content})
@@ -226,21 +209,28 @@ def run_athena_task(task: str, max_steps: int = 10):
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # Handle CSV Content from Markdown (Content Detachment)
+            # ⚡ Content Detachment Logic (Stitching)
             if action == "save_test_design":
-                csv_content = extract_code_block(content)
-                if csv_content:
-                    args["content"] = csv_content
-                elif "content" not in args:
-                    step_outputs.append("❌ Error: CSV content missing in Markdown block.")
-                    continue
+                if "content" not in args or len(args["content"]) < 10:
+                    csv_content = extract_code_block(content)
+                    if csv_content:
+                        args["content"] = csv_content
+                        print("📝 Extracted CSV from Markdown block.")
+                    else:
+                        print("⚠️ Warning: No CSV content found.")
+                        step_outputs.append("Error: CSV content missing from Markdown block.")
+                        continue
 
             print(f"🔧 Executing: {action}")
             result = execute_tool_dynamic(action, args)
-            print(f"📄 Result: {result}")
-            step_outputs.append(f"Tool Output ({action}): {result}")
 
-            # Strict Atomicity
+            display_result = result
+            if action == "save_test_design":
+                display_result = f"✅ CSV Saved: {args.get('filename')}"
+
+            print(
+                f"📄 Result: {display_result[:300]}..." if len(display_result) > 300 else f"📄 Result: {display_result}")
+            step_outputs.append(f"Tool Output ({action}): {result}")
             break
 
         if task_finished:
