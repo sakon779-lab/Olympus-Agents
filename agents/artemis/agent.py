@@ -10,7 +10,7 @@ from typing import Dict, Any, List
 from core.config import settings
 from core.llm_client import query_qwen
 
-# ✅ Core Tools (Note: NO Jira here)
+# ✅ Core Tools
 from core.tools.file_ops import read_file, list_files, write_file, append_file
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
 from core.tools.cmd_ops import run_command
@@ -23,19 +23,19 @@ logger = logging.getLogger("Artemis")
 # ==============================================================================
 # 🛠️ AGENT SPECIFIC TOOLS
 # ==============================================================================
-def run_robot_test(test_path: str) -> str:
+def run_robot_test(file_path: str) -> str:
     """Executes Robot Framework tests."""
     workspace = settings.AGENT_WORKSPACE
     try:
         # Construct full path if relative
-        if not os.path.isabs(test_path):
-            test_path = os.path.join(workspace, test_path)
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(workspace, file_path)
 
-        if not os.path.exists(test_path):
-            return f"❌ Error: Test file '{test_path}' not found."
+        if not os.path.exists(file_path):
+            return f"❌ Error: Test file '{file_path}' not found."
 
         # Run robot command
-        cmd = f'python -m robot -d results "{test_path}"'
+        cmd = f'python -m robot -d results "{file_path}"'
         logger.info(f"⚡ Executing Robot: {cmd}")
 
         # Capture output (UTF-8 for Windows compatibility)
@@ -59,7 +59,7 @@ def install_package_wrapper(package_name: str) -> str:
     return run_command(f"{sys.executable} -m pip install {package_name}")
 
 
-# Tools Registry (Jira Removed!)
+# Tools Registry
 TOOLS = {
     "list_files": list_files,
     "read_file": read_file,
@@ -84,63 +84,57 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Artemis - Strict Syntax Edition)
+# 🧠 SYSTEM PROMPT (Strict Syntax + Strict Sequence)
 # ==============================================================================
 ROBOT_BLOCK_START = "```" + "robot"
 ROBOT_BLOCK_END = "```"
 
 SYSTEM_PROMPT = f"""
 You are "Artemis", the Senior QA Automation Engineer.
-Your goal is to convert Test Designs (CSV) into executable Robot Framework scripts.
 
 *** 📚 ROBOT SYNTAX CHEATSHEET (CORRECT USAGE) ***
 You MUST follow these patterns exactly. Do not guess arguments.
 1. **Create Session**:
-   ✅ `Create Session    alias_name    http://127.0.0.1:8000`
-   ❌ `Create Session    http://127.0.0.1:8000` (Wrong: Missing alias)
+   `Create Session    api    http://127.0.0.1:8000`
 
-2. **GET On Session** (Modern Keyword):
-   ✅ `GET On Session    alias_name    /endpoint`
-   ❌ `GET On Session    /endpoint` (Wrong: Missing alias)
+2. **GET Request (Capture Response)**:
+   ✅ `${{resp}}=    GET On Session    api    /hello/World`
+   ❌ `GET On Session    api    /hello/World` (Wrong: Response lost)
 
-3. **JSON Access**:
-   ✅ `${{json}}=    Set Variable    ${{response.json()}}`
-   ❌ `${{json}}=    Evaluate    response.json()` (Wrong: Python eval fails)
+3. **Check Status**:
+   ✅ `Status Should Be    200    ${{resp}}`
+   ❌ `Should Be Equal    ${{resp.status_code}}    200` (Less readable)
 
-*** 🛑 STRICT ANTI-PATTERNS 🛑 ***
-1. **NO RECURSION**: NEVER write a `*** Keywords ***` section that redefines `Create Session` or `GET On Session`.
-2. **NO LOCALHOST**: Use `127.0.0.1` to avoid IPv6 issues.
+4. **JSON Validation**:
+   `${{json}}=    Set Variable    ${{resp.json()}}`
+   `Should Be Equal As Strings    ${{json['message']}}    Hello, World!`
 
-*** 🧠 WORKFLOW (AUTONOMOUS) ***
-1. **SETUP**: `git_setup_workspace(issue_key)`.
-2. **READ DESIGN**: 
-   - `read_file("test_designs/{{issue_key}}.csv")`.
-   - *If file not found*: Ask user to run Athena first.
+*** 🛑 CRITICAL RULES (DO NOT IGNORE) ***
+1. **ZERO KNOWLEDGE**: You DO NOT know the API requirements yet. You MUST read the CSV first.
+2. **NO GUESSING**: Do not invent endpoints (like `/users`). Use ONLY what is in the CSV.
+3. **SEQUENCE ENFORCEMENT**:
+   - ❌ FORBIDDEN: Calling `write_file` before `read_file`.
+   - ✅ REQUIRED: `git_setup_workspace` -> `read_file` -> `write_file` -> `run_robot_test`.
+
+*** 🧠 WORKFLOW ***
+1. **SETUP**: 
+   - Extract `issue_key` (e.g., SCRUM-26).
+   - Call `git_setup_workspace(issue_key)`.
+
+2. **ACQUIRE SPECS (MANDATORY)**: 
+   - Call `read_file("test_designs/{{issue_key}}.csv")`.
+   - Wait for the content. Do NOT proceed until you see the CSV data.
+
 3. **IMPLEMENT**: 
-   - Convert CSV rows to Robot Test Cases.
+   - Convert the CSV data EXACTLY into Robot Framework code using the **CHEATSHEET** above.
    - `write_file("tests/{{issue_key}}.robot", content)`.
-4. **VERIFY**: 
+
+4. **VERIFY & DELIVER**: 
    - `run_robot_test("tests/{{issue_key}}.robot")`.
-   - 🛑 IF FAIL: Analyze log -> Fix code -> Retry.
-5. **DELIVER**: 
-   - `git_commit` -> `git_push` -> `create_pr` -> `task_complete`.
+   - If Pass: `git_commit` -> `git_push` -> `create_pr`.
 
 *** ⚡ CONTENT DELIVERY ***
 Output Robot code in a Markdown Block AFTER the JSON.
-
-**CORRECT FORMAT:**
-{{ "action": "write_file", "args": {{ "file_path": "tests/SCRUM-26.robot" }} }}
-
-{ROBOT_BLOCK_START}
-*** Settings ***
-Library  RequestsLibrary
-Library  Collections
-
-*** Test Cases ***
-Example Test
-    Create Session  api  http://127.0.0.1:8000
-    ...
-{ROBOT_BLOCK_END}
 
 RESPONSE FORMAT (JSON ONLY + CODE BLOCK):
 {{ "action": "tool_name", "args": {{ ... }} }}
@@ -151,11 +145,8 @@ RESPONSE FORMAT (JSON ONLY + CODE BLOCK):
 # 🧩 HELPER: PARSERS
 # ==============================================================================
 def extract_code_block(text: str) -> str:
-    # 1. Look for explicit robot tag
     matches = re.findall(r"```robot\n(.*?)```", text, re.DOTALL)
     if matches: return matches[-1].strip()
-
-    # 2. Fallback
     matches = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     for content in reversed(matches):
         cleaned = content.strip()
@@ -186,7 +177,6 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # 🚀 MAIN LOOP
 # ==============================================================================
 def run_artemis_task(task: str, max_steps: int = 30):
-    # Enforce Identity
     if settings.CURRENT_AGENT_NAME != "Artemis":
         logger.warning(f"⚠️ Switching Identity to 'Artemis'...")
         settings.CURRENT_AGENT_NAME = "Artemis"
@@ -239,7 +229,6 @@ def run_artemis_task(task: str, max_steps: int = 30):
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # ⚡ Content Detachment Logic
             if action in ["write_file", "append_file"]:
                 if "content" not in args or len(args["content"]) < 10:
                     code_content = extract_code_block(content)
