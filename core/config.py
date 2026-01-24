@@ -29,12 +29,24 @@ class Settings(BaseSettings):
     CURRENT_AGENT_NAME: str = "Common"
 
     @property
+    def TEST_DESIGN_DIR(self) -> str:
+        """
+        ตำแหน่งเก็บไฟล์ Test Design (CSV)
+        Path: {QA_REPO_PATH}/test_designs
+        """
+        # ใช้ QA Repo เป็นฐาน (ไม่ว่าจะรันโดยใคร ถ้าเรียก property นี้ต้องได้ path นี้)
+        return os.path.join(self.QA_REPO_PATH, "test_designs")
+
+    @property
     def TARGET_REPO_PATH(self) -> str:
         """Select Repo based on Agent Role"""
-        if self.CURRENT_AGENT_NAME == "Artemis":
+        # ✅ จับ Athena มาอยู่แก๊งเดียวกับ Artemis (QA Repo)
+        if self.CURRENT_AGENT_NAME in ["Artemis", "Athena"]:
             return self.QA_REPO_PATH
+
         elif self.CURRENT_AGENT_NAME == "Hephaestus":
             return self.DEV_REPO_PATH
+
         return self.DEV_REPO_PATH
 
     @property
