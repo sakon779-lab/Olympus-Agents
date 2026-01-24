@@ -2,6 +2,7 @@ import subprocess
 import os
 import logging
 from typing import Optional
+import shutil
 from core.config import settings
 
 # Setup Logging
@@ -132,13 +133,26 @@ def git_push(branch_name: str) -> str:
         return f"❌ Push Error: {e}"
 
 
-def create_pr(title: str, body: str, branch: str) -> str:
-    """Create Pull Request using GitHub CLI (gh)"""
+
+def create_pr(title: str, body: str, branch: str = None) -> str: # 👈 ให้ branch เป็น Optional
+    """
+    Create Pull Request using GitHub CLI (gh)
+    If 'branch' is not provided, it defaults to the current checked-out branch.
+    """
     workspace = settings.AGENT_WORKSPACE
     try:
-        # ตรวจสอบว่ามี gh cli ไหม
         if shutil.which("gh") is None:
-            return "❌ Error: GitHub CLI ('gh') is not installed on the host machine."
+             return "❌ Error: GitHub CLI ('gh') is not installed."
+
+        # ✅ Auto-detect branch if missing
+        if not branch:
+            logger.info("🌿 Branch not specified, detecting current branch...")
+            branch = subprocess.check_output(
+                "git branch --show-current",
+                shell=True,
+                cwd=workspace,
+                text=True
+            ).strip()
 
         cmd = f'gh pr create --title "{title}" --body "{body}" --head "{branch}" --base "main"'
         result = subprocess.run(cmd, shell=True, cwd=workspace, capture_output=True, text=True)
@@ -146,7 +160,7 @@ def create_pr(title: str, body: str, branch: str) -> str:
         if result.returncode == 0:
             return f"✅ PR Created: {result.stdout.strip()}"
         elif "already exists" in result.stderr:
-            return f"✅ PR already exists for this branch."
+            return f"✅ PR already exists for {branch}."
         else:
             return f"❌ PR Failed: {result.stderr}"
     except Exception as e:
