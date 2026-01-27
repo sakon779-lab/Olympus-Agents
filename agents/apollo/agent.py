@@ -3,91 +3,55 @@ import logging
 import re
 import os
 import sys
-import ast
 from typing import Dict, Any, List
 
 # ✅ Core Modules
 from core.llm_client import query_qwen
-from core.config import JIRA_URL, JIRA_EMAIL, JIRA_TOKEN
+from core.config import settings
 
-# ✅ Core Tools (Shared Skills)
-from core.tools.file_ops import read_file, list_files
+# ✅ Core Tools (Knowledge Only)
 from core.tools.jira_ops import read_jira_ticket
 from core.tools.knowledge_ops import save_knowledge
 
 # ✅ Knowledge Base Integration
-# พยายาม Import Vector Store ถ้าไม่มีให้ใช้ Dummy Function เพื่อป้องกัน Crash
+# (เลือกใช้ Vector Store ตัวเทพของคุณ)
 try:
-    # สมมติว่าโครงสร้างโปรเจกต์คุณมี knowledge_base/vector_store.py
-    sys.path.append(os.getcwd())  # Ensure root is in path
     from knowledge_base.vector_store import search_vector_db
-
     KNOWLEDGE_BASE_ACTIVE = True
 except ImportError:
     KNOWLEDGE_BASE_ACTIVE = False
 
 
-    def search_vector_db(query: str, k: int = 4) -> str:
-        return "⚠️ Error: Knowledge Base module not found. Please setup 'knowledge_base/vector_store.py'."
-
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
 
-
 # ==============================================================================
-# 🛠️ APOLLO SPECIFIC TOOLS (Knowledge Skills)
+# 🛠️ APOLLO SPECIFIC TOOLS
 # ==============================================================================
-
 def ask_guru(question: str) -> str:
     """
     Search the Knowledge Base (Vector DB) for concepts, logic, or past specs.
-    Use this when user asks "How...", "What is...", or "Explain...".
     """
     logger.info(f"🔎 Guru searching for: {question}")
-
     if not KNOWLEDGE_BASE_ACTIVE:
-        return "❌ Knowledge Base is not active. I cannot search for historical data."
-
+        return "❌ Knowledge Base is not active."
     try:
-        results = search_vector_db(question, k=5)
-        if not results or "not found" in results.lower():
+        results = search_vector_db(question, k=4)
+        if not results or "no relevant info" in results.lower():
             return f"❌ I searched the database but found no relevant info about '{question}'."
         return f"📚 Knowledge Found:\n{results}"
     except Exception as e:
         return f"❌ Search Error: {e}"
 
-
-def read_project_file(file_path: str) -> str:
-    """
-    Read the content of a specific file to understand the code logic.
-    Wrapper around core read_file.
-    """
-    return read_file(file_path)
-
-
-def inspect_project_structure(directory: str = ".") -> str:
-    """
-    List files in a directory to understand project layout.
-    Wrapper around core list_files.
-    """
-    return list_files(directory)
-
-
 # ==============================================================================
-# 🧩 TOOLS REGISTRY
+# 🧩 TOOLS REGISTRY (เอา list_files/read_file ออกแล้ว)
 # ==============================================================================
 TOOLS = {
-    # Core Tools
     "read_jira_ticket": read_jira_ticket,
-
-    # Apollo Specific Tools
     "ask_guru": ask_guru,
-    "read_file": read_project_file,
-    "list_files": inspect_project_structure,
     "save_knowledge": save_knowledge
 }
-
 
 def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name not in TOOLS: return f"Error: Unknown tool '{tool_name}'"
@@ -97,56 +61,56 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
     except Exception as e:
         return f"Error executing {tool_name}: {e}"
 
-
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Apollo Persona)
+# 🧠 SYSTEM PROMPT (Pure Knowledge Mode)
 # ==============================================================================
 SYSTEM_PROMPT = """
 You are "Apollo", the Knowledge Guru of Olympus.
 Your goal is to LEARN from Jira Tickets and ANSWER questions based on that knowledge.
 
 *** 🧠 YOUR CAPABILITIES ***
-1. **Search Knowledge**: Use `ask_guru(question)` to find technical specs, business logic, or past decisions in the Vector DB.
-2. **Read Requirements**: Use `read_jira_ticket(issue_key)` to understand current tasks.
-3. **Save Knowledge**: Use `save_knowledge(...)` to store insights.
-4. **Analyze Code**: Use `list_files` and `read_file` to inspect the actual codebase.
+1. **Search**: `ask_guru(question)` to find info in Vector DB.
+2. **Read**: `read_jira_ticket(issue_key)` to inspect requirements.
+3. **Memorize**: `save_knowledge(...)` to store insights.
 
-*** 🔄 MODE 1: LEARNING (SYNC) ***
-If user says "Sync SCRUM-26" or "Learn about SCRUM-26":
-1. Call `read_jira_ticket` with argument `issue_key="SCRUM-26"`.
-2. Analyze the raw text and Extract key info.
-3. Call `save_knowledge` with these structured details:
-   - `issue_key`: "SCRUM-26"
-   - `summary`: Ticket title
-   - `status`: Ticket status
-   - `business_logic`: Summarize the goal and rules.
-   - `technical_spec`: List APIs, DB tables, Libraries.
-   - `test_scenarios`: List 3-5 key test cases.
-4. Call `task_complete`.
+*** 🚫 LIMITATIONS ***
+- You do NOT have access to the source code files. 
+- You CANNOT list or read files from the repo. 
+- If user asks about specific code implementation details that are not in Jira/DB, explain that you are the Knowledge Agent and they should ask Hephaestus (Dev Agent).
 
-*** 🔍 MODE 2: ANSWERING (RAG) ***
-If user asks a question (e.g., "How does login work?"):
-1. Call `ask_guru("How does login work?")`.
-2. Read the search results.
-3. Explain the answer clearly using the retrieved context.
+*** 🚦 WORKFLOW MODES (STRICT) ***
 
-*** CRITICAL: ATOMICITY ***
-- ONE Action per turn.
-- Wait for tool output before proceeding.
+1. **MODE: SYNC / LEARN** 📥
+   - **Trigger**: User says "Sync", "Learn", "Memorize", "Update knowledge".
+   - **Step-by-Step**: 
+     1. Call `read_jira_ticket(issue_key)`.
+     2. Analyze text & Extract: Business Logic, Tech Spec, Test Scenarios.
+     3. Call `save_knowledge(...)` (Convert Lists to Strings first).
+     4. Call `task_complete("Synced knowledge for [Key]")`.
 
-*** CRITICAL: JSON FORMAT RULES ***
-1. **NO COMMENTS**: Do NOT use `//` or `#` inside the JSON. It breaks the parser.
-2. **STRICT TYPES**: 
-   - `technical_spec` and `test_scenarios` should be STRINGS (Text summaries), NOT Lists/Objects. 
-   - If you want to list items, use a markdown list string (e.g., "- API: /hello\n- DB: User").
+2. **MODE: Q&A / CONSULTING** 🗣️
+   - **Trigger**: User asks "How", "What", "Explain", "Does".
+   - **Step-by-Step**:
+     1. **Attempt 1**: Call `ask_guru(question)`.
+     2. **Decision**:
+        - ✅ **IF Found**: Explain the answer clearly. Call `task_complete(answer)`.
+        - ❌ **IF NOT Found**: 
+          - Call `read_jira_ticket(issue_key)` (ONLY if you know the Key e.g. SCRUM-xx).
+          - **CRITICAL**: If you still can't find it, admit it. Do NOT hallucinate code or paths.
+          - Call `task_complete("I couldn't find info on X. Please check the Ticket ID.")`.
+
+*** ⚠️ CRITICAL RULES ***
+1. **ATOMICITY**: One tool per turn.
+2. **JSON FORMAT**: No comments. Strict JSON.
+3. **PRIORITY**: Answer the question directly based on retrieved info.
 
 *** 🛠️ TOOLS AVAILABLE ***
-- read_jira_ticket(issue_key: str)
-- save_knowledge(issue_key, summary, status, issue_type, business_logic, technical_spec, test_scenarios)
+- read_jira_ticket(issue_key)
+- save_knowledge(issue_key, summary, status, business_logic, technical_spec, test_scenarios, issue_type)
 - ask_guru(question)
 - task_complete(summary)
 
-RESPONSE FORMAT (JSON ONLY, NO COMMENTS):
+RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """
 
