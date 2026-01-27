@@ -109,6 +109,13 @@ CaseID, TestType, Description, PreRequisites, Steps, ExpectedResult
 TC-001, Positive, Verify API, Mock: None, Call GET /api, 200 OK
 {CSV_BLOCK_END}
 
+*** 🛡️ ERROR HANDLING STRATEGIES (GIT) ***
+- **IF `git_push` FAILS** (rejected/non-fast-forward):
+  1. STOP! Do NOT create PR yet.
+  2. Call `git_pull(branch_name)` to sync changes.
+  3. Call `git_push(branch_name)` AGAIN to retry.
+  4. Only then, proceed to `create_pr`.
+
 *** ⚡ WORKFLOW (STRICT ORDER) ***
 1. `read_jira_ticket` -> Wait for result.
 2. `git_setup_workspace` -> Wait for result.
