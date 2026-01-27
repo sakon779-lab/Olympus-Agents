@@ -140,6 +140,13 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
    - `create_pr` (Leave `branch` arg empty/null).
    - `task_complete`.
 
+*** 🛡️ ERROR HANDLING STRATEGIES (GIT) ***
+- **IF `git_push` FAILS** (rejected/non-fast-forward):
+  1. STOP! Do NOT create PR yet.
+  2. Call `git_pull(branch_name)` to sync changes.
+  3. Call `git_push(branch_name)` AGAIN to retry.
+  4. Only then, proceed to `create_pr`.
+
 *** ERROR HANDLING ***
 - Docker Build Error? -> Check syntax. If output is garbled but file exists, proceed.
 - Git Push Error? -> Ensure you are pushing the CURRENT branch.

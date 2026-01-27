@@ -12,7 +12,7 @@ from core.llm_client import query_qwen
 
 # ✅ Core Tools
 from core.tools.file_ops import read_file, list_files, write_file, append_file
-from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
+from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
 from core.tools.cmd_ops import run_command
 
 # Logging Setup
@@ -65,6 +65,7 @@ TOOLS = {
     "append_file": append_file,
     "git_setup_workspace": git_setup_workspace,
     "git_commit": git_commit,
+    "git_pull": git_pull,
     "git_push": git_push,
     "create_pr": create_pr,
     "run_robot_test": run_robot_test,
@@ -127,6 +128,13 @@ You are "Artemis", the Senior QA Automation Engineer.
 *** ⚡ CONTENT DELIVERY ***
 **CORRECT FORMAT:**
 {{ "action": "write_file", "args": {{ "file_path": "tests/SCRUM-26.robot" }} }}
+
+*** 🛡️ ERROR HANDLING STRATEGIES (GIT) ***
+- **IF `git_push` FAILS** (rejected/non-fast-forward):
+  1. STOP! Do NOT create PR yet.
+  2. Call `git_pull(branch_name)` to sync changes.
+  3. Call `git_push(branch_name)` AGAIN to retry.
+  4. Only then, proceed to `create_pr`.
 
 {ROBOT_BLOCK_START}
 *** Settings ***
