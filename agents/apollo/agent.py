@@ -12,35 +12,46 @@ from core.config import settings
 # ✅ Core Tools (Knowledge Only)
 from core.tools.jira_ops import read_jira_ticket
 from core.tools.knowledge_ops import save_knowledge
-
-# ✅ Knowledge Base Integration
-# (เลือกใช้ Vector Store ตัวเทพของคุณ)
-try:
-    from knowledge_base.vector_store import search_vector_db
-    KNOWLEDGE_BASE_ACTIVE = True
-except ImportError:
-    KNOWLEDGE_BASE_ACTIVE = False
-
+from core.tools.knowledge_ops import get_knowledge_from_sql
+from knowledge_base.vector_store import search_vector_db
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
+
 
 # ==============================================================================
 # 🛠️ APOLLO SPECIFIC TOOLS
 # ==============================================================================
 def ask_guru(question: str) -> str:
     """
-    Search the Knowledge Base (Vector DB) for concepts, logic, or past specs.
+    Hybrid Search:
+    1. Checks if the question mentions a specific Ticket ID -> Queries SQL.
+    2. Otherwise -> Queries Vector DB for semantic search.
     """
     logger.info(f"🔎 Guru searching for: {question}")
-    if not KNOWLEDGE_BASE_ACTIVE:
-        return "❌ Knowledge Base is not active."
+
+    # 1️⃣ STRATEGY 1: SQL Lookup (Exact Key)
+    # หาคำว่า SCRUM-XX, BUG-XX, TASK-XX
+    ticket_pattern = r"([A-Z]+-\d+)"
+    match = re.search(ticket_pattern, question)
+
+    if match:
+        ticket_key = match.group(1)
+        logger.info(f"🎯 Detected Ticket Key: {ticket_key} -> Checking SQL...")
+        sql_result = get_knowledge_from_sql(ticket_key)
+
+        if sql_result:
+            return f"📚 Knowledge Found (Exact Match from SQL):\n{sql_result}"
+        else:
+            logger.info(f"⚠️ Key {ticket_key} not found in SQL. Falling back to Vector...")
+
+    # 2️⃣ STRATEGY 2: Vector Search (Semantic)
     try:
         results = search_vector_db(question, k=4)
         if not results or "no relevant info" in results.lower():
             return f"❌ I searched the database but found no relevant info about '{question}'."
-        return f"📚 Knowledge Found:\n{results}"
+        return f"📚 Knowledge Found (Semantic Search):\n{results}"
     except Exception as e:
         return f"❌ Search Error: {e}"
 

@@ -4,10 +4,33 @@ from typing import Any
 from knowledge_base.database import SessionLocal, init_db
 from knowledge_base.models import JiraKnowledge
 from knowledge_base.vector_store import add_ticket_to_vector
+from knowledge_base.database import SessionLocal
+from knowledge_base.models import JiraKnowledge
+import re # ✅ เพิ่ม import re
 
 init_db()
 logger = logging.getLogger("KnowledgeOps")
 
+
+# ✅ เพิ่มฟังก์ชันใหม่: อ่านจาก SQL
+def get_knowledge_from_sql(issue_key: str) -> str:
+    session = SessionLocal()
+    try:
+        knowledge = session.query(JiraKnowledge).filter(JiraKnowledge.issue_key == issue_key).first()
+        if not knowledge:
+            return None
+
+        return f"""
+        📌 [SQL Source] Ticket: {knowledge.issue_key}
+        Summary: {knowledge.summary}
+        Status: {knowledge.status}
+        Logic: {knowledge.business_logic}
+        Tech Spec: {knowledge.technical_spec}
+        """
+    except Exception as e:
+        return None
+    finally:
+        session.close()
 
 # ✅ เพิ่ม parameter: issue_type (default="Task")
 def save_knowledge(issue_key: str, summary: str, status: str, business_logic: str, technical_spec: Any,
