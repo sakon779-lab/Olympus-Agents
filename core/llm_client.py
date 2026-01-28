@@ -1,50 +1,69 @@
 import requests
 import json
-import sys
 import time
+import logging
+from core.config import settings
 
-# Config ของ Ollama
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# ✅ Setup Logger
+logger = logging.getLogger("LLM_Client")
 
-# ⚠️ เช็คชื่อ Model ให้ตรงกับใน 'ollama list'
-# (จาก Log เก่าคุณใช้ชื่อ model path ยาวๆ แต่ถ้า ollama list ขึ้นว่า qwen3:8b ก็ใช้ตามนั้น)
-# MODEL_NAME = "qwen3:8b"
-# MODEL_NAME = "qwen2.5-coder:1.5b"
-# MODEL_NAME = "qwen2.5-coder:7b"
-MODEL_NAME = "qwen2.5-coder:14b"
-
+# ✅ Import LangChain (Optional)
+try:
+    from langchain_ollama import ChatOllama
+except ImportError:
+    ChatOllama = None
 
 
-def query_qwen(messages: list, temperature=0.2) -> str:
-    print(f"\n[DEBUG] 📡 Connecting to Ollama at {OLLAMA_URL}...", flush=True)
-    print(f"[DEBUG] 🧠 Model: {MODEL_NAME}", flush=True)
+def get_langchain_llm(temperature: float = 0):
+    """
+    ✅ Factory Function: สร้าง LangChain Object
+    ใช้สำหรับ SQL Agent หรือ Tool ที่ต้องการ LangChain Inteface
+    """
+    if ChatOllama is None:
+        raise ImportError("❌ Please install 'langchain-ollama' to use this feature.")
+
+    return ChatOllama(
+        base_url=settings.OLLAMA_BASE_URL,
+        model=settings.MODEL_NAME,
+        temperature=temperature
+    )
+
+
+def query_qwen(messages: list, temperature: float = 0.2) -> str:
+    """
+    ✅ Raw Function: ยิง Request ตรงๆ พร้อม Streaming output
+    ใช้สำหรับ Conversation ทั่วไปของ Agent
+    """
+    # Construct Full URL
+    api_url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+
+    print(f"\n[DEBUG] 📡 Connecting to Ollama at {api_url}...", flush=True)
+    print(f"[DEBUG] 🧠 Model: {settings.MODEL_NAME}", flush=True)
 
     payload = {
-        "model": MODEL_NAME,
+        "model": settings.MODEL_NAME,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
         "options": {
-            "num_ctx": 4096,  # 🔻 ลด Context ลงเหลือ 4096 ก่อน เพื่อความเร็วและชัวร์
-            "temperature": 0.2,  # ลดความ Creative ลงให้นิ่งขึ้น
+            "num_ctx": 4096,
             "num_predict": -1
         }
     }
 
     try:
-        start_time = time.time()
-
         print("[DEBUG] ⏳ Sending request... (Waiting for headers)", flush=True)
 
-        # ✅ แก้ตรงนี้: เปลี่ยน timeout=30 เป็น timeout=120 (2 นาที) หรือ None
-        with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=None) as response:
-            print(f"[DEBUG] ✅ Connected! Status Code: {response.status_code}", flush=True)
-
+        # Timeout 120s เผื่อ Model คิดนาน
+        with requests.post(api_url, json=payload, stream=True, timeout=120) as response:
             if response.status_code != 200:
-                print(f"[ERROR] Server returned error: {response.text}", flush=True)
-                return f"Error: Server returned {response.status_code}"
+                error_msg = f"Error: Server returned {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                return error_msg
 
+            print(f"[DEBUG] ✅ Connected! Status Code: {response.status_code}", flush=True)
             print("🤖 AI: ", end="", flush=True)
+
             full_content = ""
 
             for line in response.iter_lines():
@@ -59,9 +78,8 @@ def query_qwen(messages: list, temperature=0.2) -> str:
 
                         if body.get("done", False):
                             total_duration = body.get("total_duration", 0) / 1e9
-                            eval_count = body.get("eval_count", 0)
-                            print(f"\n\n[DEBUG] 🏁 Done in {total_duration:.2f}s (Tokens: {eval_count})")
-                            break
+                            tokens = body.get("eval_count", 0)
+                            print(f"\n\n[DEBUG] 🏁 Done in {total_duration:.2f}s (Tokens: {tokens})")
 
                     except json.JSONDecodeError:
                         continue
@@ -70,11 +88,11 @@ def query_qwen(messages: list, temperature=0.2) -> str:
             return full_content
 
     except requests.exceptions.Timeout:
-        print("\n[ERROR] ❌ Connection Timed Out! (Ollama took longer than 120s)")
-        return "Error: Timeout"
+        logger.error("Connection Timed Out")
+        return "Error: Timeout (Ollama took too long)"
     except requests.exceptions.ConnectionError:
-        print("\n[ERROR] ❌ Could not connect to Ollama. Is the server running?")
-        return "Error: Connection Refused"
+        logger.error("Could not connect to Ollama")
+        return "Error: Connection Refused (Is Ollama running?)"
     except Exception as e:
-        print(f"\n[ERROR] ❌ Unexpected Error: {str(e)}")
+        logger.exception("Unexpected Error")
         return f"Error: {str(e)}"

@@ -21,3 +21,7 @@ langchain-ollama
 chromadb
 psycopg2-binary
 pydantic-settings
+
+psycopg2-binary
+langchain-community
+langchain-experimental

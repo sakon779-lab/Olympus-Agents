@@ -3,65 +3,126 @@ import logging
 import re
 import os
 import sys
+import ast  # ✅ [FIX 1] เพิ่ม import ast
 from typing import Dict, Any, List
 
 # ✅ Core Modules
-from core.llm_client import query_qwen
+from core.llm_client import query_qwen, get_langchain_llm
 from core.config import settings
 
 # ✅ Core Tools (Knowledge Only)
 from core.tools.jira_ops import read_jira_ticket
-from core.tools.knowledge_ops import save_knowledge
-from core.tools.knowledge_ops import get_knowledge_from_sql
+from core.tools.knowledge_ops import save_knowledge, get_knowledge_from_sql
+
+# ✅ Knowledge Base Integration (Vector Store)
 from knowledge_base.vector_store import search_vector_db
+
+# ✅ LangChain & SQL Agent (สำหรับวิเคราะห์ Database จริง)
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import create_sql_agent
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
 
+# ==============================================================================
+# 🔌 DATABASE CONNECTION (PostgreSQL - Application DB)
+# ==============================================================================
+try:
+    # ใช้ settings.DATABASE_URI จาก config.py
+    app_db = SQLDatabase.from_uri(settings.DATABASE_URI, sample_rows_in_table_info=0)
+
+    # ดึง LLM แบบ LangChain Object
+    agent_llm = get_langchain_llm(temperature=0)
+
+    # สร้าง SQL Agent Executor
+    sql_agent_executor = create_sql_agent(
+        llm=agent_llm,
+        db=app_db,
+        agent_type="zero-shot-react-description",
+        verbose=True,
+        handle_parsing_errors=True  # <-- เพิ่มอันนี้ช่วยกัน error
+    )
+    SQL_ANALYST_ACTIVE = True
+    logger.info(f"✅ SQL Analyst: Connected to DB at {settings.DB_HOST}")
+except Exception as e:
+    logger.error(f"❌ SQL Analyst: Connection Failed - {e}")
+    SQL_ANALYST_ACTIVE = False
 
 # ==============================================================================
 # 🛠️ APOLLO SPECIFIC TOOLS
 # ==============================================================================
+def ask_database_analyst(question: str) -> str:
+    """
+    Expert on Data & Statistics.
+    Use this for: "How many...", "Count...", "List all...", "Check if exists...".
+    Target: Can query both 'Application DB' (Users) and 'Knowledge DB' (Jira stats).
+    """
+    if not SQL_ANALYST_ACTIVE:
+        return "❌ Error: Cannot connect to the application database."
+
+    logger.info(f"📊 Analyst querying: {question}")
+    try:
+        # ✅ FIX: ใส่ Prompt Injection เพื่อบังคับให้ข้าม Step การดู Schema นานๆ
+        # สั่งให้ "เมิน" ข้อมูลตัวอย่าง และ "บังคับ" ให้เขียน Query
+        forced_prompt = (
+            f"Do NOT just look at the schema or sample rows. "
+            f"Do NOT check schema or list tables repeatedly. "
+            f"You MUST execute a SQL query to get the real answer. "
+            f"Question: {question}"
+        )
+        result = sql_agent_executor.invoke(forced_prompt)
+        output = result.get('output', str(result))
+        return f"📊 Database Analysis Result:\n{output}"
+    except Exception as e:
+        return f"❌ SQL Analyst Error: {e}"
+
+
 def ask_guru(question: str) -> str:
     """
-    Hybrid Search:
-    1. Checks if the question mentions a specific Ticket ID -> Queries SQL.
-    2. Otherwise -> Queries Vector DB for semantic search.
+    Expert on Business Logic & Jira Tickets.
+    Use this for: "What is SCRUM-26?", "Explain login logic", "How does X work?".
+    NOT for: Counting or Statistics.
     """
-    logger.info(f"🔎 Guru searching for: {question}")
+    logger.info(f"🔎 Guru received: {question}")
 
-    # 1️⃣ STRATEGY 1: SQL Lookup (Exact Key)
-    # หาคำว่า SCRUM-XX, BUG-XX, TASK-XX
+    # 🎯 Layer 1: The Sniper (Exact Match via Regex)
+    # หาว่าในคำถามมีรหัส Ticket ไหม (เช่น SCRUM-26, PAY-101)
     ticket_pattern = r"([A-Z]+-\d+)"
-    match = re.search(ticket_pattern, question)
+    matches = re.findall(ticket_pattern, question)
 
-    if match:
-        ticket_key = match.group(1)
-        logger.info(f"🎯 Detected Ticket Key: {ticket_key} -> Checking SQL...")
-        sql_result = get_knowledge_from_sql(ticket_key)
+    if matches:
+        # ถ้าเจอ ID ให้ดึงข้อมูลตรงๆ จาก SQL (Internal Knowledge DB)
+        # วิธีนี้แม่นยำกว่า Vector Search มาก
+        logger.info(f"🎯 Direct Lookup IDs: {matches}")
+        results = []
+        for ticket_key in matches:
+            data = get_knowledge_from_sql(ticket_key)  # ฟังก์ชันเดิมที่คุณมี
+            if data:
+                results.append(f"📄 Ticket {ticket_key}:\n{data}")
 
-        if sql_result:
-            return f"📚 Knowledge Found (Exact Match from SQL):\n{sql_result}"
-        else:
-            logger.info(f"⚠️ Key {ticket_key} not found in SQL. Falling back to Vector...")
+        if results:
+            return "\n---\n".join(results)
 
-    # 2️⃣ STRATEGY 2: Vector Search (Semantic)
+    # 📚 Layer 2: The Librarian (Vector Search)
+    # ถ้าไม่เจอ ID หรือหาไม่เจอ ให้ใช้ Vector Search หาด้วยความหมาย
+    logger.info("🧠 Fallback to Semantic Search...")
     try:
         results = search_vector_db(question, k=4)
         if not results or "no relevant info" in results.lower():
-            return f"❌ I searched the database but found no relevant info about '{question}'."
-        return f"📚 Knowledge Found (Semantic Search):\n{results}"
+            return "❌ No info found in knowledge base."
+        return f"📚 Relevant Docs found:\n{results}"
     except Exception as e:
         return f"❌ Search Error: {e}"
 
 # ==============================================================================
-# 🧩 TOOLS REGISTRY (เอา list_files/read_file ออกแล้ว)
+# 🧩 TOOLS REGISTRY
 # ==============================================================================
 TOOLS = {
     "read_jira_ticket": read_jira_ticket,
-    "ask_guru": ask_guru,
-    "save_knowledge": save_knowledge
+    "save_knowledge": save_knowledge,
+    "ask_guru": ask_guru,             # ถามความรู้ (Docs/Jira/Internal SQL)
+    "ask_database_analyst": ask_database_analyst # ถามข้อมูลจริง (External Postgres)
 }
 
 def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
@@ -73,52 +134,42 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
         return f"Error executing {tool_name}: {e}"
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Pure Knowledge Mode)
+# 🧠 SYSTEM PROMPT
 # ==============================================================================
 SYSTEM_PROMPT = """
-You are "Apollo", the Knowledge Guru of Olympus.
-Your goal is to LEARN from Jira Tickets and ANSWER questions based on that knowledge.
+You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 
-*** 🧠 YOUR CAPABILITIES ***
-1. **Search**: `ask_guru(question)` to find info in Vector DB.
-2. **Read**: `read_jira_ticket(issue_key)` to inspect requirements.
-3. **Memorize**: `save_knowledge(...)` to store insights.
+*** 🧠 DECISION TREE (Follow Strictly) ***
 
-*** 🚫 LIMITATIONS ***
-- You do NOT have access to the source code files. 
-- You CANNOT list or read files from the repo. 
-- If user asks about specific code implementation details that are not in Jira/DB, explain that you are the Knowledge Agent and they should ask Hephaestus (Dev Agent).
+1. **CASE: User asks for DEFINITION / LOGIC / CONTENT** 📖
+   - Examples: "What is SCRUM-26?", "Explain the login flow", "Show me the requirements".
+   - ✅ ACTION: Use `ask_guru(question)`.
+   - (This tool handles both specific ticket IDs and general semantic search).
 
-*** 🚦 WORKFLOW MODES (STRICT) ***
+2. **CASE: User asks for NUMBERS / LISTS / AGGREGATION** 📊
+   - Examples: "How many tickets?", "Count users", "List all tickets in To Do".
+   - ✅ ACTION: Use `ask_database_analyst(question)`.
+   - (This tool runs SQL queries to get exact stats).
 
-1. **MODE: SYNC / LEARN** 📥
-   - **Trigger**: User says "Sync", "Learn", "Memorize", "Update knowledge".
-   - **Step-by-Step**: 
-     1. Call `read_jira_ticket(issue_key)`.
-     2. Analyze text & Extract: Business Logic, Tech Spec, Test Scenarios.
-     3. Call `save_knowledge(...)` (Convert Lists to Strings first).
-     4. Call `task_complete("Synced knowledge for [Key]")`.
+3. **CASE: User asks to MEMORIZE / SYNC** 📥
+   - Examples: "Sync SCRUM-27", "Read this ticket".
+   - ✅ ACTION: `read_jira_ticket` -> `save_knowledge`.
 
-2. **MODE: Q&A / CONSULTING** 🗣️
-   - **Trigger**: User asks "How", "What", "Explain", "Does".
-   - **Step-by-Step**:
-     1. **Attempt 1**: Call `ask_guru(question)`.
-     2. **Decision**:
-        - ✅ **IF Found**: Explain the answer clearly. Call `task_complete(answer)`.
-        - ❌ **IF NOT Found**: 
-          - Call `read_jira_ticket(issue_key)` (ONLY if you know the Key e.g. SCRUM-xx).
-          - **CRITICAL**: If you still can't find it, admit it. Do NOT hallucinate code or paths.
-          - Call `task_complete("I couldn't find info on X. Please check the Ticket ID.")`.
+*** ⚠️ RULES ***
+- Do NOT guess. If you need stats, ask the analyst.
+- If you need content, ask the guru.
+- Output JSON format only.
 
 *** ⚠️ CRITICAL RULES ***
-1. **ATOMICITY**: One tool per turn.
+1. **ATOMICITY**: One tool per turn. Wait for result.
 2. **JSON FORMAT**: No comments. Strict JSON.
-3. **PRIORITY**: Answer the question directly based on retrieved info.
+3. **PRIORITY**: Answer the question directly based on tool output.
 
 *** 🛠️ TOOLS AVAILABLE ***
 - read_jira_ticket(issue_key)
 - save_knowledge(issue_key, summary, status, business_logic, technical_spec, test_scenarios, issue_type)
 - ask_guru(question)
+- ask_database_analyst(question)
 - task_complete(summary)
 
 RESPONSE FORMAT (JSON ONLY):
@@ -177,6 +228,10 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # 🚀 MAIN LOOP
 # ==============================================================================
 def run_apollo_task(task: str, max_steps: int = 15):
+    # Set Identity for Path Handling
+    if settings.CURRENT_AGENT_NAME != "Apollo":
+        settings.CURRENT_AGENT_NAME = "Apollo"
+
     print(f"🏛️ Launching Apollo (Knowledge Guru)...")
     print(f"📋 Question/Task: {task}")
 
@@ -207,12 +262,8 @@ def run_apollo_task(task: str, max_steps: int = 15):
         if not tool_calls:
             # Check for final answer or thought
             if "task_complete" not in content and "action" not in content:
-                # Assume it's a direct answer if no tool is called
                 print(f"ℹ️ Apollo Answer: {content}")
                 history.append({"role": "assistant", "content": content})
-                # You might want to break here if it looks like a final answer,
-                # but usually we wait for task_complete.
-                # For Apollo, sometimes just talking is the result.
             else:
                 history.append({"role": "assistant", "content": content})
             continue
@@ -250,3 +301,10 @@ def run_apollo_task(task: str, max_steps: int = 15):
         history.append({"role": "user", "content": "\n".join(step_outputs)})
 
     print("❌ FAILED: Max steps reached.")
+
+if __name__ == "__main__":
+    # Example usage for testing
+    if len(sys.argv) > 1:
+        run_apollo_task(sys.argv[1])
+    else:
+        run_apollo_task("How many users are registered?")
