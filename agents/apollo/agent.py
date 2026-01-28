@@ -40,7 +40,8 @@ try:
         llm=agent_llm,
         db=app_db,
         agent_type="zero-shot-react-description",
-        verbose=True,
+        # verbose=True, # 👈 แก้เป็น True สำหรับ run ผ่าน console
+        verbose=False,  # 👈 แก้เป็น False (สำคัญมากสำหรับ MCP)
         handle_parsing_errors=True  # <-- เพิ่มอันนี้ช่วยกัน error
     )
     SQL_ANALYST_ACTIVE = True
@@ -67,6 +68,7 @@ def ask_database_analyst(question: str) -> str:
         # สั่งให้ "เมิน" ข้อมูลตัวอย่าง และ "บังคับ" ให้เขียน Query
         forced_prompt = (
             f"Do NOT just look at the schema or sample rows. "
+            f"Note: The table 'jira_knowledge' contains all Jira tickets. "
             f"Do NOT check schema or list tables repeatedly. "
             f"You MUST execute a SQL query to get the real answer. "
             f"Question: {question}"
