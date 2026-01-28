@@ -56,23 +56,31 @@ except Exception as e:
 def ask_database_analyst(question: str) -> str:
     """
     Expert on Data & Statistics.
-    Use this for: "How many...", "Count...", "List all...", "Check if exists...".
-    Target: Can query both 'Application DB' (Users) and 'Knowledge DB' (Jira stats).
     """
     if not SQL_ANALYST_ACTIVE:
         return "❌ Error: Cannot connect to the application database."
 
     logger.info(f"📊 Analyst querying: {question}")
     try:
-        # ✅ FIX: ใส่ Prompt Injection เพื่อบังคับให้ข้าม Step การดู Schema นานๆ
-        # สั่งให้ "เมิน" ข้อมูลตัวอย่าง และ "บังคับ" ให้เขียน Query
+        # ✅ DYNAMIC PROMPT: ไม่ระบุชื่อตาราง ไม่ระบุคำสั่ง (Count)
+        # ปล่อยให้ Agent ใช้สมองเลือกเองตามสถานการณ์
         forced_prompt = (
-            f"Do NOT just look at the schema or sample rows. "
-            f"Note: The table 'jira_knowledge' contains all Jira tickets. "
-            f"Do NOT check schema or list tables repeatedly. "
-            f"You MUST execute a SQL query to get the real answer. "
-            f"Question: {question}"
+            f"Role: You are an Intelligent SQL Data Analyst.\n"
+            f"Goal: Answer the user's question accurately using the PostgreSQL database.\n\n"
+
+            f"🧠 THINKING PROTOCOL (Must follow):\n"
+            f"1. **Analyze Intent**: Does the user want to Count? List? Sum? or Check details?\n"
+            f"2. **Identify Table**: Look for the most relevant table based on keywords (e.g., 'tickets'->jira_knowledge, 'people'->users).\n"
+            f"3. **Inspect Data (Crucial)**: If the user asks to filter by text (e.g., status, role, type), NEVER guess the value.\n"
+            f"   -> Action: Run `SELECT DISTINCT column FROM table LIMIT 10` first.\n"
+            f"4. **Execute Final Query**: Once you know the exact values and table, execute the specific SQL that answers the question.\n\n"
+
+            f"Question: {question}\n\n"
+            # Chain of Thought Starter: กระตุ้นให้เริ่มคิดแบบนักสืบ
+            f"Let's think step by step. First, I need to identify which table contains the requested information.\n"
+            f"Action:"
         )
+
         result = sql_agent_executor.invoke(forced_prompt)
         output = result.get('output', str(result))
         return f"📊 Database Analysis Result:\n{output}"
