@@ -130,3 +130,35 @@ def create_pr(title: str, body: str, branch: str = None) -> str:
             return f"❌ PR Failed: {result.stderr}"
     except Exception as e:
         return f"❌ PR Error: {e}"
+
+
+def git_pull(branch_name: str = None) -> str:
+    """
+    Dulls latest changes from remote.
+    Useful when git_push fails due to non-fast-forward updates.
+    """
+    workspace = settings.AGENT_WORKSPACE
+    try:
+        # ถ้าไม่ส่ง branch_name มา ให้หาเองจาก current branch
+        if not branch_name:
+            branch_name = subprocess.check_output(
+                "git branch --show-current",
+                shell=True,
+                cwd=workspace,
+                text=True
+            ).strip()
+
+        logger.info(f"🔄 Pulling latest changes for {branch_name}...")
+
+        # ใช้ --no-rebase เพื่อให้เห็น merge commit ชัดเจนเวลามี conflict
+        cmd = f"git pull origin {branch_name} --no-rebase"
+        result = subprocess.run(cmd, shell=True, cwd=workspace, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            return f"✅ Pull Success: {result.stdout.strip()}"
+        else:
+            # กรณีมี Conflict หรือ Error อื่นๆ
+            return f"❌ Pull Failed (Conflict?): {result.stderr.strip()}"
+
+    except Exception as e:
+        return f"❌ Pull Error: {e}"

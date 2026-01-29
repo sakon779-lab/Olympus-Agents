@@ -13,7 +13,7 @@ from core.llm_client import query_qwen
 # ✅ Core Tools
 from core.tools.jira_ops import read_jira_ticket
 from core.tools.file_ops import read_file, write_file, append_file, list_files
-from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
+from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
@@ -76,6 +76,7 @@ TOOLS = {
     "git_setup_workspace": git_setup_workspace,
     "git_commit": git_commit,
     "git_push": git_push,
+    "git_pull": git_pull,
     "create_pr": create_pr,
     "write_file": write_file,
     "append_file": append_file,
