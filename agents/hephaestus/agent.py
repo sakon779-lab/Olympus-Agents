@@ -188,6 +188,10 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # 🚀 MAIN LOOP
 # ==============================================================================
 def run_hephaestus_task(task: str, max_steps: int = 30):
+    # Enforce Identity
+    if settings.CURRENT_AGENT_NAME != "Hephaestus":
+        print(f"⚠️ Switching Identity to 'Hephaestus'...")
+        settings.CURRENT_AGENT_NAME = "Hephaestus"
     print(f"🔨 Launching Hephaestus (The Builder)...")
     print(f"🆔 Identity: {settings.CURRENT_AGENT_NAME}")
     print(f"📂 Workspace: {settings.AGENT_WORKSPACE}")
