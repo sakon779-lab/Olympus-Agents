@@ -1,6 +1,7 @@
 import subprocess
 import os
 import logging
+import re
 import shutil
 from core.config import settings
 
@@ -9,7 +10,7 @@ logger = logging.getLogger("GitOps")
 
 def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
     """
-    Clone Repo จาก URL ลง Workspace โดยตรง ไม่ต้องพึ่ง Local Source Path
+    Clone Repo จาก URL ลง Workspace โดยตรง พร้อมระบบ Auto-Detect Branch และ Zombie Folder Cleanup
     """
     # ✅ ดึง URL จาก Config (QA หรือ Dev ตาม Role Agent)
     remote_url = settings.TARGET_REPO_URL
@@ -17,49 +18,66 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
     feature_branch = f"feature/{issue_key}"
 
     logger.info(f"🔧 Agent '{settings.CURRENT_AGENT_NAME}' is starting setup...")
-    logger.info(f"   🔗 Remote URL: {remote_url}")
+    logger.info(f"   🔗 Remote URL: {remote_url}")  # Token จะโชว์ใน Log (ระวังเรื่อง Security ใน Prod)
     logger.info(f"   📂 Target Workspace: {agent_workspace}")
 
     try:
+        # ✅ STEP 0: Safety Check (Zombie Folder Cleanup)
+        # ถ้ามี Folder อยู่ แต่ข้างในไม่มี .git แสดงว่าเป็นซากปรักหักพัง -> ลบทิ้ง!
+        if os.path.exists(agent_workspace):
+            git_folder = os.path.join(agent_workspace, ".git")
+            if not os.path.exists(git_folder):
+                logger.warning(f"⚠️ Found corrupt workspace (no .git). Deleting: {agent_workspace}")
+                shutil.rmtree(agent_workspace, ignore_errors=True)
+
         # STEP 1: Clone (ถ้ายังไม่มี)
         if not os.path.exists(agent_workspace):
             logger.info(f"📂 Creating Workspace: {agent_workspace}")
             os.makedirs(agent_workspace, exist_ok=True)
-            logger.info(f"⬇️ Cloning from {remote_url}...")
-            # Clone ลง folder นี้เลย (.)
-            subprocess.run(f'git clone "{remote_url}" .', shell=True, cwd=agent_workspace, check=True)
+            logger.info(f"⬇️ Cloning repository...")
+            # ใช้ --no-checkout เพื่อโหลด .git มาก่อน แล้วค่อยเลือก Branch ทีหลัง
+            subprocess.run(f'git clone --no-checkout "{remote_url}" .', shell=True, cwd=agent_workspace, check=True)
         else:
             logger.info(f"📂 Workspace exists. Checking remote...")
-            # เช็คว่า Remote ตรงกันไหม (กันเหนียว)
+            # เช็คว่า Remote ตรงกันไหม (ถ้าไม่ตรง สั่ง Error ให้คนมาดู)
             try:
                 current_remote = subprocess.check_output("git config --get remote.origin.url", shell=True,
                                                          cwd=agent_workspace, text=True).strip()
+                # หมายเหตุ: การเช็คตรงนี้อาจจะไม่ผ่านถ้า URL เดิมไม่มี Token แต่ URL ใหม่มี Token
+                # แต่ในเคสนี้เรายอมให้ Error เพื่อบังคับให้ใช้ URL แบบมี Token
                 if current_remote != remote_url:
-                    return f"❌ Error: Workspace exists but points to wrong remote ({current_remote}). Please delete workspace."
+                    # ถ้า URL ไม่ตรง (เช่น Token เปลี่ยน) ให้ลบทิ้งแล้ว Clone ใหม่เลยจะง่ายกว่า return Error
+                    logger.warning("⚠️ Remote URL mismatch. Re-cloning...")
+                    shutil.rmtree(agent_workspace, ignore_errors=True)
+                    os.makedirs(agent_workspace, exist_ok=True)
+                    subprocess.run(f'git clone --no-checkout "{remote_url}" .', shell=True, cwd=agent_workspace,
+                                   check=True)
             except:
-                pass  # ถ้าเช็คไม่ได้ ให้พยายามทำต่อ
+                pass
 
-        # STEP 2: Config User
-        agent_name = settings.CURRENT_AGENT_NAME
-        subprocess.run(f'git config user.name "{agent_name} AI"', shell=True, cwd=agent_workspace)
+                # STEP 2: Detect Default Branch (แก้ปัญหา main vs master)
+        result = subprocess.run("git remote show origin", shell=True, cwd=agent_workspace, capture_output=True,
+                                text=True)
+        match = re.search(r"HEAD branch:\s+(.*)", result.stdout)
+        base_branch = match.group(1).strip() if match else "main"
+        logger.info(f"🕵️ Detected Base Branch: {base_branch}")
+
+        # STEP 3: Config & Checkout
+        subprocess.run(f'git config user.name "{settings.CURRENT_AGENT_NAME}"', shell=True, cwd=agent_workspace)
         subprocess.run('git config user.email "ai@olympus.dev"', shell=True, cwd=agent_workspace)
 
-        # STEP 3: Checkout Base Branch (main) & Pull Latest
-        logger.info(f"🔄 Syncing with {base_branch}...")
-        subprocess.run("git fetch origin", shell=True, cwd=agent_workspace, check=True)
-
-        # Reset Hard เพื่อความชัวร์ว่า File ไม่ตีกัน
-        subprocess.run(f"git checkout -f {base_branch}", shell=True, cwd=agent_workspace, check=True)
+        subprocess.run(f"git checkout {base_branch}", shell=True, cwd=agent_workspace, check=True)
         subprocess.run(f"git pull origin {base_branch}", shell=True, cwd=agent_workspace, check=True)
 
-        # STEP 4: Create/Switch Feature Branch
-        logger.info(f"🌿 Switching to branch: {feature_branch}")
+        # STEP 4: Switch to Feature
+        logger.info(f"🌿 Switching to feature branch: {feature_branch}")
         subprocess.run(f"git checkout -B {feature_branch}", shell=True, cwd=agent_workspace, check=True)
 
-        return (f"✅ Workspace Ready for {agent_name}!\n"
+        # ✅ แก้ agent_name -> settings.CURRENT_AGENT_NAME
+        return (f"✅ Workspace Ready for {settings.CURRENT_AGENT_NAME}!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch}\n"
-                f"🔗 From: {remote_url}")
+                f"🔗 Base Branch: {base_branch}")
 
     except Exception as e:
         logger.error(f"❌ Git Setup Error: {e}")
