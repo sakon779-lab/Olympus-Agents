@@ -9,14 +9,20 @@ logger = logging.getLogger("GitOps")
 
 
 # ==============================================================================
-# 🔇 HELPER: Safe Command Runner (ป้องกัน Output หลุดไปกวน MCP JSON)
+# 🔇 HELPER: Safe Command Runner (Quiet + Nuclear Anti-Popup)
 # ==============================================================================
-def run_git_cmd(command: str, cwd: str) -> str:
+# แก้ไขฟังก์ชัน run_git_cmd ให้มี Timeout และปิด Input
+def run_git_cmd(command: str, cwd: str, timeout: int = 60) -> str:
     """
-    รันคำสั่ง Git แบบ Capture Output เพื่อไม่ให้หลุดไป stdout (ซึ่งจะทำให้ MCP พัง)
+    รัน Git แบบปิดปาก + ปิดหู (No Input) + มีเวลาตาย (Timeout)
     """
     try:
-        # capture_output=True คือหัวใจสำคัญ
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GCM_INTERACTIVE"] = "never"
+        env["GIT_ASKPASS"] = "echo"
+        env["SSH_ASKPASS"] = "echo"
+
         result = subprocess.run(
             command,
             shell=True,
@@ -24,19 +30,30 @@ def run_git_cmd(command: str, cwd: str) -> str:
             capture_output=True,
             text=True,
             encoding='utf-8',
-            errors='replace'
+            errors='replace',
+            env=env,
+            input="",  # ⛔ ไม้ตาย 1: ปิดรับ Input (ตัดปัญหา Git รอพิมพ์)
+            timeout=timeout  # ⛔ ไม้ตาย 2: ถ้าเกิน 60 วิ ให้ฆ่าทิ้งแล้วฟ้อง Error
         )
 
-        # ส่ง Log ไปที่ stderr หรือไฟล์ Log แทน
         if result.stdout.strip():
             logger.info(f"   [Git Output]: {result.stdout.strip()[:200]}...")
 
         if result.returncode != 0:
-            # กรณี Error ให้ Raise พร้อมข้อความ
+            logger.error(f"❌ Git Command Failed: {command}")
+            logger.error(f"   Stderr: {result.stderr}")
             raise subprocess.CalledProcessError(result.returncode, command, output=result.stdout, stderr=result.stderr)
 
         return result.stdout.strip()
 
+    except subprocess.TimeoutExpired as e:
+        # 🚨 จับได้แล้ว! ถ้ามันค้าง มันจะมาตกที่นี่
+        logger.error(f"⏰ Git Timeout ({timeout}s): {command}")
+        logger.error(f"   Stderr (Before kill): {e.stderr}")  # ดูว่ามันบ่นอะไรก่อนตาย
+        # ลองลบ Folder ทิ้งเลยเผื่อไฟล์ Lock
+        if os.path.exists(cwd) and "clone" in command:
+            shutil.rmtree(cwd, ignore_errors=True)
+        raise e
     except Exception as e:
         raise e
 
@@ -45,9 +62,6 @@ def run_git_cmd(command: str, cwd: str) -> str:
 # 🔧 GIT SETUP
 # ==============================================================================
 def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
-    """
-    Setup Workspace: Clone -> Check Remote -> Detect Branch -> Create Feature Branch
-    """
     remote_url = settings.TARGET_REPO_URL
     agent_workspace = settings.AGENT_WORKSPACE
     feature_branch = f"feature/{issue_key}"
@@ -56,52 +70,55 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
     logger.info(f"   📂 Workspace: {agent_workspace}")
 
     try:
-        # ✅ STEP 0: Safety Check (Zombie Folder Cleanup)
+        # STEP 0: Zombie Cleanup
         if os.path.exists(agent_workspace):
             git_folder = os.path.join(agent_workspace, ".git")
             if not os.path.exists(git_folder):
-                logger.warning(f"⚠️ Corrupt workspace found (no .git). Deleting...")
+                logger.warning(f"⚠️ Corrupt workspace found. Deleting...")
                 shutil.rmtree(agent_workspace, ignore_errors=True)
 
-        # STEP 1: Clone or Verify Remote
+        # STEP 1: Clone (Quiet Mode + No Credential Helper)
         if not os.path.exists(agent_workspace):
             logger.info(f"⬇️ Cloning repository...")
             os.makedirs(agent_workspace, exist_ok=True)
-            run_git_cmd(f'git clone --no-checkout "{remote_url}" .', cwd=agent_workspace)
+
+            # ✅ FIX: เพิ่ม --quiet เพื่อแก้ปัญหาท่อตัน (Buffer Overflow)
+            cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
+            run_git_cmd(cmd, cwd=agent_workspace)
         else:
-            # ✅ RESTORED: ส่วนที่คุณทักท้วงว่าหายไป (เช็คว่า URL ตรงกันไหม)
             try:
                 logger.info(f"📂 Workspace exists. Verifying remote...")
                 current_remote = run_git_cmd("git config --get remote.origin.url", cwd=agent_workspace)
-
-                # ถ้า URL ไม่ตรง (เช่น Token เปลี่ยน) ให้ลบทิ้งแล้ว Clone ใหม่
-                if current_remote != remote_url:
-                    logger.warning(f"⚠️ Remote mismatch ({current_remote} != {remote_url}). Re-cloning...")
+                if settings.GITHUB_TOKEN and settings.GITHUB_TOKEN not in current_remote:
+                    logger.warning(f"⚠️ Remote token mismatch. Re-cloning...")
                     shutil.rmtree(agent_workspace, ignore_errors=True)
                     os.makedirs(agent_workspace, exist_ok=True)
-                    run_git_cmd(f'git clone --no-checkout "{remote_url}" .', cwd=agent_workspace)
+                    # ✅ FIX: เพิ่ม --quiet
+                    cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
+                    run_git_cmd(cmd, cwd=agent_workspace)
             except Exception as e:
-                logger.warning(f"⚠️ Could not verify remote: {e}. Proceeding anyway.")
+                logger.warning(f"⚠️ Remote check skipped: {e}")
 
-        # STEP 2: Detect Default Branch
-        logger.info("🕵️ Detecting default branch...")
-        output = run_git_cmd("git remote show origin", cwd=agent_workspace)
+        # STEP 2: Detect Branch
+        logger.info("🕵️ Detecting branch...")
+        output = run_git_cmd("git -c credential.helper= remote show origin", cwd=agent_workspace)
         match = re.search(r"HEAD branch:\s+(.*)", output)
         base_branch = match.group(1).strip() if match else "main"
-        logger.info(f"✅ Base Branch detected: {base_branch}")
+        logger.info(f"✅ Base Branch: {base_branch}")
 
         # STEP 3: Config & Checkout
         run_git_cmd(f'git config user.name "{settings.CURRENT_AGENT_NAME}"', cwd=agent_workspace)
         run_git_cmd('git config user.email "ai@olympus.dev"', cwd=agent_workspace)
 
         run_git_cmd(f"git checkout {base_branch}", cwd=agent_workspace)
-        run_git_cmd(f"git pull origin {base_branch}", cwd=agent_workspace)
+        # ✅ FIX: เพิ่ม --quiet ตอน Pull ด้วย
+        run_git_cmd(f"git -c credential.helper= pull --quiet origin {base_branch}", cwd=agent_workspace)
 
         # STEP 4: Switch to Feature
         logger.info(f"🌿 Switching to {feature_branch}")
         run_git_cmd(f"git checkout -B {feature_branch}", cwd=agent_workspace)
 
-        return (f"✅ Workspace Ready for {settings.CURRENT_AGENT_NAME}!\n"
+        return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch}\n"
                 f"🔗 Base: {base_branch}")
@@ -140,7 +157,7 @@ def git_push(branch_name: str) -> str:
         if branch_name != current_branch:
             return f"❌ Error: You are on branch '{current_branch}', but tried to push '{branch_name}'."
 
-        run_git_cmd(f"git push -u origin {branch_name}", cwd=workspace)
+        run_git_cmd(f"git -c credential.helper= push -u origin {branch_name}", cwd=workspace)
         return f"✅ Push Success: {branch_name}"
     except Exception as e:
         if hasattr(e, 'stderr'):
@@ -155,7 +172,7 @@ def git_pull(branch_name: str = None) -> str:
         if not branch_name:
             branch_name = run_git_cmd("git branch --show-current", cwd=workspace)
 
-        run_git_cmd(f"git pull origin {branch_name} --no-rebase", cwd=workspace)
+        run_git_cmd(f"git -c credential.helper= pull origin {branch_name} --no-rebase", cwd=workspace)
         return f"✅ Pull Success"
     except Exception as e:
         return f"❌ Pull Error: {e}"

@@ -26,32 +26,32 @@ logger = logging.getLogger("Artemis")
 def run_robot_test(file_path: str) -> str:
     """Executes Robot Framework tests."""
     workspace = settings.AGENT_WORKSPACE
-    try:
-        # Construct full path if relative
-        if not os.path.isabs(file_path):
-            file_path = os.path.join(workspace, file_path)
 
-        if not os.path.exists(file_path):
-            return f"❌ Error: Test file '{file_path}' not found."
+    # 1. จัดการ Path (เหมือนเดิม)
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(workspace, file_path)
 
-        cmd = f'python -m robot -d results "{file_path}"'
-        logger.info(f"⚡ Executing Robot: {cmd}")
+    if not os.path.exists(file_path):
+        return f"❌ Error: Test file '{file_path}' not found."
 
-        # Capture output (UTF-8 for Windows compatibility)
-        env = os.environ.copy()
-        env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
+    # 2. สร้าง Command (ตัด python -m ออก ให้ run_command จัดการ venv เอง)
+    # หรือจะใส่ python -m robot ก็ได้ ถ้า run_command เราฉลาดพอ
+    cmd = f'python -m robot -d results "{file_path}"'
+    logger.info(f"⚡ Executing Robot: {cmd}")
 
-        result = subprocess.run(
-            cmd, shell=True, cwd=workspace, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env
-        )
+    # 3. ✅ เรียกใช้ run_command ตัวเทพ (Timeout 10 นาที)
+    # มันจะคืนค่าเป็น "✅ Command Success: ..." หรือ "❌ Command Failed..."
+    output = run_command(cmd, cwd=workspace, timeout=600)
 
-        output = result.stdout + result.stderr
-        if result.returncode == 0:
-            return f"✅ Tests Passed:\n{output[:1000]}..."
-        else:
-            return f"❌ Tests Failed:\n{output[:1500]}..."
-    except Exception as e:
-        return f"❌ Execution Error: {e}"
+    # 4. แปลงผลลัพธ์ให้ Artemis เข้าใจง่ายๆ (ตัดคำเยิ่นเย้อ)
+    # เพราะ run_command คืนค่ามาพร้อม Header เราอาจจะส่งไปทั้งดุ้นเลยก็ได้
+    # หรือจะตัดแต่งนิดหน่อยตามสไตล์ Artemis
+    if "Command Success" in output:
+        # ตัด Header ออกนิดหน่อยเพื่อความสวยงาม (Optional)
+        clean_output = output.replace("✅ Command Success:\n", "")
+        return f"✅ Tests Passed:\n{clean_output[:1000]}..."
+    else:
+        return f"❌ Tests Failed:\n{output[:1500]}..."
 
 
 def install_package_wrapper(package_name: str) -> str:

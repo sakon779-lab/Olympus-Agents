@@ -14,6 +14,7 @@ from core.llm_client import query_qwen
 from core.tools.jira_ops import read_jira_ticket
 from core.tools.file_ops import read_file, write_file, append_file, list_files
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
+from core.tools.git_ops import run_git_cmd
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
@@ -24,8 +25,13 @@ logger = logging.getLogger("Hephaestus")
 # 🛠️ HEPHAESTUS SPECIFIC TOOLS (Sandbox Commanders)
 # ==============================================================================
 
-def run_sandbox_command(command: str) -> str:
-    """Executes a shell command inside the Agent's Workspace."""
+def run_sandbox_command(command: str, timeout: int = 300) -> str:
+    """
+    Executes a shell command inside the Agent's Workspace.
+    Args:
+        command: The command to run.
+        timeout: Max time in seconds (default 300s / 5 mins).
+    """
     workspace = settings.AGENT_WORKSPACE
 
     if not os.path.exists(workspace):
@@ -35,25 +41,62 @@ def run_sandbox_command(command: str) -> str:
 
     try:
         env = os.environ.copy()
+        # เพิ่ม Workspace เข้า PYTHONPATH เพื่อให้ Python หา module เจอ
         env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
 
-        # ✅ FIX: UTF-8 encoding for Windows Docker output
+        # 🔧 Environment Fixes (ชุดแก้ค้าง)
+        env["PYTHONUTF8"] = "1"  # บังคับ UTF-8 (แก้ปัญหา encoding บน Windows)
+        env["PIP_NO_INPUT"] = "1"  # ห้าม pip ถาม (Important!)
+
+        # =========================================================
+        # 🛡️ VENV AUTO-LOADER (พระเอกขี่ม้าขาว)
+        # =========================================================
+        # ตรวจหา .venv ใน Workspace
+        venv_path = os.path.join(workspace, ".venv")
+
+        if os.path.exists(venv_path):
+            # ตรวจสอบ OS เพื่อเลือก Path ให้ถูก (Windows vs Unix)
+            if os.name == 'nt':  # Windows
+                venv_scripts = os.path.join(venv_path, "Scripts")
+                python_executable = os.path.join(venv_scripts, "python.exe")
+            else:  # Linux/Mac
+                venv_scripts = os.path.join(venv_path, "bin")
+                python_executable = os.path.join(venv_scripts, "python")
+
+            # ✅ ถ้าเจอ venv ให้ยัดเข้า PATH เป็นลำดับแรก!
+            # ทำให้เวลาพิมพ์ 'python' หรือ 'pytest' มันจะเจอตัวใน venv ก่อนเสมอ
+            if os.path.exists(venv_scripts):
+                env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
+                env["VIRTUAL_ENV"] = venv_path
+
+            # (Optional) Log บอกเราหน่อยว่าเจอ venv
+            logger.info(f"🔌 Activated venv at: {venv_path}")
+
         result = subprocess.run(
             command,
             shell=True,
             cwd=workspace,
             capture_output=True,
             text=True,
-            encoding='utf-8',
-            errors='replace',
-            env=env
+            encoding='utf-8',  # บังคับอ่าน Output เป็น UTF-8
+            errors='replace',  # ถ้าเจออักขระแปลกๆ ให้แทนที่ด้วย ? (ไม่ให้โปรแกรมพัง)
+            env=env,
+            input="",  # ⛔ ไม้ตาย 1: ปิด Input (ตัดปัญหา Prompt รอใส่ค่า)
+            timeout=timeout  # ⛔ ไม้ตาย 2: ตัดจบเมื่อหมดเวลา
         )
 
-        output = result.stdout + result.stderr
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+
         if result.returncode == 0:
-            return f"✅ Command Success:\n{output.strip()}"
+            return f"✅ Command Success:\n{output}"
         else:
-            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output.strip()}"
+            # ส่ง Error กลับไปให้ Agent อ่าน (สำคัญมากสำหรับการ Debug)
+            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
+
+    except subprocess.TimeoutExpired:
+        # จับได้ว่า Timeout -> ฆ่า Process ทิ้ง
+        return f"⏰ Command Timeout! (Over {timeout}s). The process was killed to prevent freezing."
 
     except Exception as e:
         return f"❌ Execution Error: {e}"
@@ -108,7 +151,7 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
    - NEVER overwrite a file blindly. Always APPEND or MERGE new code while preserving existing functionality (e.g., do not delete old endpoints).
 3. 🛠️ **ENVIRONMENT SETUP (PRIORITY #1)**:
    - Immediately after Git Setup, check for `requirements.txt`.
-   - If it exists, your FIRST action must be: `run_command("pip install -r requirements.txt")`.
+   - If it exists, your FIRST action must be: `run_command("pip install -q -r requirements.txt")`.
    - Always verify tools (`pytest`, `httpx`) are installed before running tests.
 
 *** WORKFLOW ***
@@ -120,7 +163,7 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
 
 3. **DEPENDENCIES**: 
    - Call `list_files` to check for `requirements.txt`.
-   - If found -> `run_command("pip install -r requirements.txt")`.
+   - If found -> `run_command("pip install -q -r requirements.txt")`.
    - If missing tools -> `run_command("pip install pytest httpx fastapi uvicorn")`.
 
 4. **PLAN & EXPLORE**: 
@@ -198,7 +241,7 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task: str, max_steps: int = 30):
+def run_hephaestus_task(task: str, max_steps: int = 50):
     # Enforce Identity
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         print(f"⚠️ Switching Identity to 'Hephaestus'...")
@@ -243,10 +286,67 @@ def run_hephaestus_task(task: str, max_steps: int = 30):
             args = tool_call.get("args", {})
 
             if action == "task_complete":
-                task_finished = True
-                result = args.get("summary", "Done")
-                step_outputs.append(f"Task Completed: {result}")
-                break
+                # รับค่า mode จาก Agent (ถ้าไม่ส่งมา ให้ถือว่าเป็น "code" ไว้ก่อน เพื่อความปลอดภัย)
+                task_mode = args.get("mode", "code").lower()
+
+                validation_error = None
+                workspace = settings.AGENT_WORKSPACE
+
+                # ---------------------------------------------------------
+                # 🛡️ 1. เช็คของเน่า (Uncommitted Changes) - โดนทุกกรณี
+                # ---------------------------------------------------------
+                status = run_git_cmd("git status --porcelain", cwd=workspace)
+                if status.strip():
+                    validation_error = "❌ REJECTED: มีไฟล์ที่แก้ค้างไว้แต่ยังไม่ Commit. กรุณา Commit หรือ Discard ก่อนจบงาน"
+
+                # ---------------------------------------------------------
+                # 🛡️ 2. เช็คผลงาน (แยกตาม Mode)
+                # ---------------------------------------------------------
+                if not validation_error:
+                    # เช็คว่ามีการแก้ไฟล์จริงๆ ไหม
+                    current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
+                    is_main = current_branch in ["main", "master"]
+
+                    # ดูว่ามี Diff จาก Main ไหม
+                    if not is_main:
+                        diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
+                        has_changes = bool(diff_output.strip())
+                    else:
+                        has_changes = False
+
+                    # === CASE A: Agent บอกว่าเป็นงาน Code (หรือ Default) ===
+                    if task_mode == "code":
+                        if not has_changes:
+                            validation_error = (
+                                "❌ REJECTED: คุณแจ้งจบงานในโหมด 'code' แต่ไม่พบการแก้ไขไฟล์ใดๆ เลย!\n"
+                                "   - ถ้างานนี้ต้องแก้โค้ด: กรุณาเขียนโค้ดและ Commit\n"
+                                "   - ถ้างานนี้เป็นแค่การอ่าน/วิเคราะห์: กรุณาส่ง args 'mode': 'analysis' มาใน task_complete"
+                            )
+                        elif not is_main:  # ถ้าแก้โค้ด ต้องมี PR
+                            pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
+                            if "no open pull requests" in pr_check or not pr_check.strip():
+                                validation_error = "❌ REJECTED: มีการแก้โค้ดแล้ว แต่ยังไม่สร้าง PR (Pull Request). กรุณาสร้างก่อน"
+
+                    # === CASE B: Agent บอกว่าเป็นงาน Analysis ===
+                    elif task_mode == "analysis":
+                        if has_changes:
+                            # เตือนหน่อย: บอกว่าวิเคราะห์เฉยๆ ไหงมีไฟล์เปลี่ยน?
+                            print(
+                                f"⚠️ WARNING: จบงานโหมด Analysis แต่ตรวจพบไฟล์เปลี่ยนแปลง ({current_branch}) เช็คให้แน่ใจว่าไม่ได้ลืม PR นะ")
+                            # แต่ยอมให้ผ่าน (Pass)
+
+                # ---------------------------------------------------------
+                # 🚦 ตัดสินใจ
+                # ---------------------------------------------------------
+                if validation_error:
+                    print(f"🚫 {validation_error}")
+                    step_outputs.append(validation_error)
+                    break
+                else:
+                    task_finished = True
+                    result = args.get("summary", "Done")
+                    step_outputs.append(f"Task Completed: {result}")
+                    break
 
             if action not in TOOLS:
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
