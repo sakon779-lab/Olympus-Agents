@@ -5,6 +5,7 @@ import logging
 import shutil
 import re
 from core.config import settings
+from core.tools.cmd_ops import run_command
 
 logger = logging.getLogger("GitOps")
 
@@ -119,29 +120,40 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
         run_git_cmd(f"git checkout -B {feature_branch}", cwd=agent_workspace)
 
         # =========================================================
-        # 🆕 SYSTEM: Auto-Create Venv (The Life Saver)
+        # 🆕 SYSTEM: Auto-Create Venv (Powered by run_command)
         # =========================================================
-        # ใช้ตัวแปร agent_workspace เพื่อความ consistency
         venv_path = os.path.join(agent_workspace, ".venv")
 
         if not os.path.exists(venv_path):
             logger.info(f"📦 Creating virtual environment at: {venv_path}...")
-            try:
-                # 1. สร้าง venv
-                subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=agent_workspace, check=True)
+
+            # 💡 TRICK: ใช้ sys.executable เพื่อเรียก Python ตัวเดียวกับที่รัน Agent
+            # ใส่ฟันหนู "" ครอบ Path กันกรณีมีเว้นวรรค (เช่น C:\Program Files\...)
+            create_cmd = f'"{sys.executable}" -m venv .venv'
+
+            # เรียกใช้ run_command ตัวเก่งของคุณ
+            result = run_command(create_cmd, cwd=agent_workspace, timeout=300)
+
+            if "Success" in result:
                 logger.info("✅ .venv created successfully!")
 
-                # 2. 🛡️ เพิ่มเกราะป้องกัน (เฉพาะ Windows)
-                # สร้างไฟล์บอก pip ว่า "ห้ามลงแบบ --user นะ" ต่อให้ Agent สั่งมาก็ตาม
-                if os.name == 'nt':
-                    pip_ini_path = os.path.join(venv_path, "pip.ini")
-                    with open(pip_ini_path, "w") as f:
-                        f.write("[global]\nuser = false\n")
-            except Exception as e:
-                logger.error(f"⚠️ Failed to create .venv: {e}")
+                # =========================================================
+                # 🛡️ OPTION: สร้างเกราะป้องกัน pip --user (ใส่ตรงนี้เลย!)
+                # =========================================================
+                if os.name == 'nt':  # เฉพาะ Windows
+                    try:
+                        pip_ini_path = os.path.join(venv_path, "pip.ini")
+                        with open(pip_ini_path, "w") as f:
+                            f.write("[global]\nuser = false\n")
+                        logger.info("🛡️ pip.ini created: Blocked '--user' install.")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to create pip.ini: {e}")
+                # =========================================================
+            else:
+                logger.error(f"⚠️ Failed to create .venv: {result}")
+                # (Optional) ถ้าซีเรียสมาก ให้ return Error กลับไปเลย
         else:
             logger.info("ℹ️ .venv already exists.")
-        # =========================================================
 
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
