@@ -6,6 +6,7 @@ import sys
 import ast  # ✅ [FIX 1] เพิ่ม import ast
 from typing import Dict, Any, List
 
+
 # ✅ Core Modules
 from core.llm_client import query_qwen, get_langchain_llm
 from core.config import settings
@@ -24,6 +25,7 @@ from langchain_community.agent_toolkits import create_sql_agent
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 # ==============================================================================
 # 🔌 DATABASE CONNECTION (PostgreSQL - Application DB)

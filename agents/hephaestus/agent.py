@@ -58,10 +58,10 @@ def run_sandbox_command(command: str, timeout: int = 300) -> str:
             # ตรวจสอบ OS เพื่อเลือก Path ให้ถูก (Windows vs Unix)
             if os.name == 'nt':  # Windows
                 venv_scripts = os.path.join(venv_path, "Scripts")
-                python_executable = os.path.join(venv_scripts, "python.exe")
+                # python_executable = os.path.join(venv_scripts, "python.exe")
             else:  # Linux/Mac
                 venv_scripts = os.path.join(venv_path, "bin")
-                python_executable = os.path.join(venv_scripts, "python")
+                # python_executable = os.path.join(venv_scripts, "python")
 
             # ✅ ถ้าเจอ venv ให้ยัดเข้า PATH เป็นลำดับแรก!
             # ทำให้เวลาพิมพ์ 'python' หรือ 'pytest' มันจะเจอตัวใน venv ก่อนเสมอ
@@ -260,12 +260,10 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
         print(f"\n🔄 Thinking (Step {step + 1})...")
         try:
             response = query_qwen(history)
-
             if isinstance(response, dict):
                 content = response.get('message', {}).get('content', '') or response.get('content', '')
             else:
                 content = str(response)
-
         except Exception as e:
             print(f"❌ Error querying LLM: {e}")
             return
@@ -286,62 +284,89 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
             args = tool_call.get("args", {})
 
             if action == "task_complete":
-                # รับค่า mode จาก Agent (ถ้าไม่ส่งมา ให้ถือว่าเป็น "code" ไว้ก่อน เพื่อความปลอดภัย)
+                # รับค่า mode (Default = code)
                 task_mode = args.get("mode", "code").lower()
 
                 validation_error = None
                 workspace = settings.AGENT_WORKSPACE
 
                 # ---------------------------------------------------------
-                # 🛡️ 1. เช็คของเน่า (Uncommitted Changes) - โดนทุกกรณี
+                # 🛡️ 1. Check Uncommitted Changes
                 # ---------------------------------------------------------
                 status = run_git_cmd("git status --porcelain", cwd=workspace)
                 if status.strip():
-                    validation_error = "❌ REJECTED: มีไฟล์ที่แก้ค้างไว้แต่ยังไม่ Commit. กรุณา Commit หรือ Discard ก่อนจบงาน"
+                    validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
 
                 # ---------------------------------------------------------
-                # 🛡️ 2. เช็คผลงาน (แยกตาม Mode)
+                # 🛡️ 2. Verify Work (Mode Based)
                 # ---------------------------------------------------------
                 if not validation_error:
-                    # เช็คว่ามีการแก้ไฟล์จริงๆ ไหม
                     current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
                     is_main = current_branch in ["main", "master"]
 
-                    # ดูว่ามี Diff จาก Main ไหม
+                    # เตรียมตัวแปรไว้ก่อน กันพัง
+                    source_files = []
+                    config_files = []
+                    test_files = []
+                    has_changes = False
+
                     if not is_main:
                         diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
-                        has_changes = bool(diff_output.strip())
+                        changed_files = diff_output.strip().splitlines()
+
+                        # ✅ Logic แยกประเภทไฟล์ (ที่หายไป ผมเติมให้แล้วครับ)
+                        if changed_files:
+                            has_changes = True
+                            for f in changed_files:
+                                f = f.strip()
+                                # ปรับ Pattern ตาม Project Structure ของคุณ
+                                if f.startswith("src/") or f.startswith("app/") or f.endswith(
+                                        ".py") and "test" not in f:
+                                    source_files.append(f)
+                                elif f.startswith("tests/") or "test" in f:
+                                    test_files.append(f)
+                                else:
+                                    config_files.append(f)
                     else:
                         has_changes = False
 
-                    # === CASE A: Agent บอกว่าเป็นงาน Code (หรือ Default) ===
+                    # === CASE A: Code Mode ===
                     if task_mode == "code":
                         if not has_changes:
                             validation_error = (
-                                "❌ REJECTED: คุณแจ้งจบงานในโหมด 'code' แต่ไม่พบการแก้ไขไฟล์ใดๆ เลย!\n"
-                                "   - ถ้างานนี้ต้องแก้โค้ด: กรุณาเขียนโค้ดและ Commit\n"
-                                "   - ถ้างานนี้เป็นแค่การอ่าน/วิเคราะห์: กรุณาส่ง args 'mode': 'analysis' มาใน task_complete"
+                                "❌ REJECTED: No file changes detected compared to main branch.\n"
+                                "If you made changes, did you forget to 'git push'?\n"
+                                "If this is just analysis, please use mode='analysis'."
                             )
-                        elif not is_main:  # ถ้าแก้โค้ด ต้องมี PR
+                        # เช็คว่าแก้แต่ Config หรือเปล่า (ถ้าเคร่งครัด)
+                        elif not source_files and (config_files or test_files):
+                            validation_error = (
+                                "❌ REJECTED: No SOURCE CODE changes detected!\n"
+                                f"   - Config/Docs changed: {config_files}\n"
+                                f"   - Tests changed: {test_files}\n"
+                                "⚠️ But NO changes in 'src/' or logic files found.\n"
+                                "Feature implementation MUST include source code changes."
+                            )
+
+                        # เช็ค PR
+                        elif not is_main and not validation_error:
                             pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
                             if "no open pull requests" in pr_check or not pr_check.strip():
-                                validation_error = "❌ REJECTED: มีการแก้โค้ดแล้ว แต่ยังไม่สร้าง PR (Pull Request). กรุณาสร้างก่อน"
+                                validation_error = "❌ REJECTED: Code committed but NO Pull Request (PR) found. Please create a PR first."
 
-                    # === CASE B: Agent บอกว่าเป็นงาน Analysis ===
+                    # === CASE B: Analysis Mode ===
                     elif task_mode == "analysis":
                         if has_changes:
-                            # เตือนหน่อย: บอกว่าวิเคราะห์เฉยๆ ไหงมีไฟล์เปลี่ยน?
                             print(
-                                f"⚠️ WARNING: จบงานโหมด Analysis แต่ตรวจพบไฟล์เปลี่ยนแปลง ({current_branch}) เช็คให้แน่ใจว่าไม่ได้ลืม PR นะ")
-                            # แต่ยอมให้ผ่าน (Pass)
+                                f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
 
                 # ---------------------------------------------------------
-                # 🚦 ตัดสินใจ
+                # 🚦 Decide
                 # ---------------------------------------------------------
                 if validation_error:
                     print(f"🚫 {validation_error}")
                     step_outputs.append(validation_error)
-                    break
+                    break  # Break inner loop to return error to Agent
                 else:
                     task_finished = True
                     result = args.get("summary", "Done")
@@ -370,7 +395,6 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
             print(
                 f"📄 Result: {display_result[:300]}..." if len(display_result) > 300 else f"📄 Result: {display_result}")
             step_outputs.append(f"Tool Output ({action}): {result}")
-
             break
 
         if task_finished:

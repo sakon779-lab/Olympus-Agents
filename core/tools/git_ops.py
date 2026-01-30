@@ -118,6 +118,23 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
         logger.info(f"🌿 Switching to {feature_branch}")
         run_git_cmd(f"git checkout -B {feature_branch}", cwd=agent_workspace)
 
+        # =========================================================
+        # 🆕 เพิ่มระบบ Auto-Create Venv
+        # =========================================================
+        venv_path = os.path.join(settings.AGENT_WORKSPACE, ".venv")
+
+        if not os.path.exists(venv_path):
+            print(f"📦 Creating virtual environment at: {venv_path}...")
+            try:
+                # ใช้ sys.executable เพื่อเรียก python ตัวปัจจุบันมาสร้าง venv
+                subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=settings.AGENT_WORKSPACE, check=True)
+                print("✅ .venv created successfully!")
+            except Exception as e:
+                print(f"⚠️ Failed to create .venv: {e}")
+        else:
+            print("ℹ️ .venv already exists.")
+        # =========================================================
+
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch}\n"
@@ -146,23 +163,46 @@ def git_commit(message: str) -> str:
 
 
 def git_push(branch_name: str) -> str:
+    """
+    Pushes changes to remote.
+    🤖 SMART LOGIC: If a normal push fails (non-fast-forward) on a feature branch,
+    it automatically attempts a FORCE PUSH to overwrite the stale remote branch.
+    """
     workspace = settings.AGENT_WORKSPACE
+
+    # 1. เช็ค Branch ปัจจุบัน
     try:
-        if branch_name in ["main", "master"]:
-            return "❌ Error: Direct push to main/master is FORBIDDEN."
-
-        # ✅ Check Current Branch (ใช้ run_git_cmd เพื่อความปลอดภัย)
         current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
-
         if branch_name != current_branch:
             return f"❌ Error: You are on branch '{current_branch}', but tried to push '{branch_name}'."
-
-        run_git_cmd(f"git -c credential.helper= push -u origin {branch_name}", cwd=workspace)
-        return f"✅ Push Success: {branch_name}"
     except Exception as e:
-        if hasattr(e, 'stderr'):
-            return f"❌ Push Failed: {e.stderr}"
-        return f"❌ Push Error: {e}"
+        return f"❌ Git Error: {e}"
+
+    # 2. ลอง Push แบบปกติ (Standard Push)
+    cmd = f"git -c credential.helper= push -u origin {branch_name}"
+    result = run_git_cmd(cmd, cwd=workspace)
+
+    # 3. 🚨 เช็คว่าพังไหม? (Auto-Recovery Logic)
+    # ถ้า Error บอกว่า [rejected] ... (non-fast-forward)
+    if "error" in result.lower() and "non-fast-forward" in result.lower():
+
+        # 🛡️ Safety Guard: ห้าม Force Push ใส่ Main/Master เด็ดขาด!
+        if branch_name in ["main", "master", "production"]:
+            return f"❌ Push Failed: Remote branch is ahead. Please 'git_pull' first. (Force push blocked on {branch_name})"
+
+        # ⚡ EXECUTE FORCE PUSH (แก้ปัญหา Stale Remote)
+        print(f"⚠️ Git Push Failed (Non-fast-forward). Attempting FORCE PUSH on feature branch '{branch_name}'...")
+
+        force_cmd = f"git -c credential.helper= push -f -u origin {branch_name}"
+        force_result = run_git_cmd(force_cmd, cwd=workspace)
+
+        if "error" not in force_result.lower():
+            return f"✅ Push Success (Forced Update): {branch_name} has been overwritten with your latest code."
+        else:
+            return f"❌ Force Push Failed: {force_result}"
+
+    # ถ้า Push ปกติผ่าน หรือ Error เรื่องอื่น
+    return result
 
 
 def git_pull(branch_name: str = None) -> str:

@@ -3,8 +3,8 @@ import logging
 from typing import List, Dict
 
 # ✅ ใช้ Library เดิมที่คุณถนัด (LangChain)
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
+# from langchain_chroma import Chroma
+# from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
 
 # Setup Path
@@ -29,6 +29,14 @@ def get_vector_db():
 
     if _VECTOR_DB is None:
         logging.info("⏳ Initializing Vector DB (Lazy Load)...")
+
+        # ✅ ย้าย Import มาไว้ตรงนี้! (โหลดเมื่อใช้เท่านั้น)
+        try:
+            from langchain_chroma import Chroma
+            from langchain_ollama import OllamaEmbeddings
+        except ImportError as e:
+            logging.error(f"❌ Critical Import Error: {e}")
+            raise e
 
         # 1. Init Embeddings
         _EMBEDDINGS = OllamaEmbeddings(
