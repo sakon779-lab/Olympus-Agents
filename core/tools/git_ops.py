@@ -1,4 +1,5 @@
-import subprocess
+import sys          # <--- อย่าลืม!
+import subprocess   # <--- อย่าลืม!
 import os
 import logging
 import shutil
@@ -82,7 +83,7 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
             logger.info(f"⬇️ Cloning repository...")
             os.makedirs(agent_workspace, exist_ok=True)
 
-            # ✅ FIX: เพิ่ม --quiet เพื่อแก้ปัญหาท่อตัน (Buffer Overflow)
+            # ✅ FIX: เพิ่ม --quiet เพื่อแก้ปัญหาท่อตัน
             cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
             run_git_cmd(cmd, cwd=agent_workspace)
         else:
@@ -93,7 +94,6 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
                     logger.warning(f"⚠️ Remote token mismatch. Re-cloning...")
                     shutil.rmtree(agent_workspace, ignore_errors=True)
                     os.makedirs(agent_workspace, exist_ok=True)
-                    # ✅ FIX: เพิ่ม --quiet
                     cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
                     run_git_cmd(cmd, cwd=agent_workspace)
             except Exception as e:
@@ -111,34 +111,43 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
         run_git_cmd('git config user.email "ai@olympus.dev"', cwd=agent_workspace)
 
         run_git_cmd(f"git checkout {base_branch}", cwd=agent_workspace)
-        # ✅ FIX: เพิ่ม --quiet ตอน Pull ด้วย
         run_git_cmd(f"git -c credential.helper= pull --quiet origin {base_branch}", cwd=agent_workspace)
 
         # STEP 4: Switch to Feature
         logger.info(f"🌿 Switching to {feature_branch}")
+        # -B จะ reset branch pointer ใหม่เสมอ (เหมือนเริ่มใหม่ทุกครั้ง) เหมาะกับ Agent มาก
         run_git_cmd(f"git checkout -B {feature_branch}", cwd=agent_workspace)
 
         # =========================================================
-        # 🆕 เพิ่มระบบ Auto-Create Venv
+        # 🆕 SYSTEM: Auto-Create Venv (The Life Saver)
         # =========================================================
-        venv_path = os.path.join(settings.AGENT_WORKSPACE, ".venv")
+        # ใช้ตัวแปร agent_workspace เพื่อความ consistency
+        venv_path = os.path.join(agent_workspace, ".venv")
 
         if not os.path.exists(venv_path):
-            print(f"📦 Creating virtual environment at: {venv_path}...")
+            logger.info(f"📦 Creating virtual environment at: {venv_path}...")
             try:
-                # ใช้ sys.executable เพื่อเรียก python ตัวปัจจุบันมาสร้าง venv
-                subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=settings.AGENT_WORKSPACE, check=True)
-                print("✅ .venv created successfully!")
+                # 1. สร้าง venv
+                subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=agent_workspace, check=True)
+                logger.info("✅ .venv created successfully!")
+
+                # 2. 🛡️ เพิ่มเกราะป้องกัน (เฉพาะ Windows)
+                # สร้างไฟล์บอก pip ว่า "ห้ามลงแบบ --user นะ" ต่อให้ Agent สั่งมาก็ตาม
+                if os.name == 'nt':
+                    pip_ini_path = os.path.join(venv_path, "pip.ini")
+                    with open(pip_ini_path, "w") as f:
+                        f.write("[global]\nuser = false\n")
             except Exception as e:
-                print(f"⚠️ Failed to create .venv: {e}")
+                logger.error(f"⚠️ Failed to create .venv: {e}")
         else:
-            print("ℹ️ .venv already exists.")
+            logger.info("ℹ️ .venv already exists.")
         # =========================================================
 
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch}\n"
-                f"🔗 Base: {base_branch}")
+                f"🔗 Base: {base_branch}\n"
+                f"📦 Venv: Configured")
 
     except Exception as e:
         logger.error(f"❌ Git Setup Error: {e}")
