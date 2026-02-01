@@ -205,7 +205,9 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
 
 *** ERROR HANDLING ***
 - Docker Build Error? -> Check syntax. If output is garbled but file exists, proceed.
+- Create requirements.txt containing only top-level dependencies (e.g. fastapi, uvicorn, pydantic) without pinning specific versions or system packages
 - Git Push Error? -> Ensure you are pushing the CURRENT branch.
+
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
