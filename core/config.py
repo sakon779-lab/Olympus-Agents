@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     CURRENT_AGENT_NAME: str = "Common"
 
     # รายชื่อ Agent ที่สังกัดทีม QA (จะถูกบังคับให้ใช้ QA Repo)
-    QA_AGENT_NAMES: List[str] = ["Athena", "Arthemis"]
+    QA_AGENT_NAMES: List[str] = ["Athena", "Artemis"]
 
     # ✅ AI CONFIGURATION
     OLLAMA_BASE_URL: str = "http://localhost:11434"

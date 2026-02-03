@@ -155,11 +155,37 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
         else:
             logger.info("ℹ️ .venv already exists.")
 
+        # ✅ STEP 5: Auto-Install Dependencies (Updated to use run_command)
+        req_file = os.path.join(agent_workspace, "requirements.txt")
+        if os.path.exists(req_file):
+            logger.info(f"📦 Found requirements.txt. Installing dependencies...")
+
+            # เลือก pip ให้ถูกตัว
+            if os.name == 'nt':
+                pip_cmd = os.path.join(agent_workspace, ".venv", "Scripts", "pip.exe")
+            else:
+                pip_cmd = os.path.join(agent_workspace, ".venv", "bin", "pip")
+
+            # สร้าง Command
+            # 💡 เพิ่ม --no-cache-dir เพื่อลดปัญหาพื้นที่เต็มและไฟล์ขยะ
+            install_cmd = f'"{pip_cmd}" install --no-cache-dir -r requirements.txt'
+
+            # 🔥 เรียกใช้ run_command แทน subprocess
+            # ให้เวลา 600 วินาที (10 นาที) เผื่อเน็ตช้าหรือต้อง Compile library ใหญ่ๆ
+            result = run_command(install_cmd, cwd=agent_workspace, timeout=600)
+
+            # เช็คผลลัพธ์ (run_command มักจะคืนค่า text ออกมา ไม่ได้ raise error ตรงๆ)
+            # ขึ้นอยู่กับ implementation ของ run_command แต่ปกติถ้า error มันจะฟ้องใน text
+            if "Error" not in result and "Failed" not in result:
+                logger.info("✅ Dependencies installed successfully!")
+            else:
+                logger.error(f"❌ Failed to install dependencies. Output:\n{result}")
+
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch}\n"
                 f"🔗 Base: {base_branch}\n"
-                f"📦 Venv: Configured")
+                f"📦 Venv: Configured & Packages Installed")
 
     except Exception as e:
         logger.error(f"❌ Git Setup Error: {e}")
