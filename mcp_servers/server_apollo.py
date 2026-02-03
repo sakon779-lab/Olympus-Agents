@@ -1,16 +1,31 @@
 import sys
 import os
 import logging
+import builtins
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+# ==============================================================================
+# 🛡️ STDOUT PROTECTION & ENCODING FIX
+# ==============================================================================
+# 1. บังคับ UTF-8 ที่ stderr (แก้ปัญหา Emoji Crash บน Windows)
+try:
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+# 2. HIJACK PRINT: บังคับทุกคำสั่ง print() ให้ลง stderr
+# สิ่งนี้จะช่วยกันไม่ให้ [DEBUG] logs หลุดไป stdout จนทำให้ JSON พัง
+original_print = builtins.print
+def patched_print(*args, **kwargs):
+    kwargs['file'] = sys.stderr
+    original_print(*args, **kwargs)
+builtins.print = patched_print
+
 # ------------------------------------------------------------------
-# 🔇 SILENCE MODE: ดักจับ Log ทุกอย่างให้ไปออก stderr (ช่องทางรอง)
-# ห้ามมีอะไรออก stdout (ช่องทางหลัก) เด็ดขาด ไม่งั้น Claude ตัดสาย
+# 🔇 LOGGING SETUP
 # ------------------------------------------------------------------
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
-
-# ปิดปาก Library ขี้บ่น (LangChain, SQLAlchemy) ให้เงียบกริบ
 logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
 logging.getLogger("langchain").setLevel(logging.ERROR)
 
@@ -23,12 +38,12 @@ sys.path.append(project_root)
 load_dotenv(os.path.join(project_root, ".env"))
 
 # 3. Import Functions
-# ใช้ sys.stderr.write เพื่อ Debug แทน print (Claude จะไม่อ่านช่องทางนี้)
 try:
-    from agents.apollo.agent import ask_guru, ask_database_analyst
-    sys.stderr.write("✅ [DEBUG] Apollo Agent imported successfully.\n")
+    from agents.apollo.agent import ask_guru, ask_database_analyst, sync_ticket_to_knowledge_base
+    # ใช้ print ได้เลย เพราะเรา Patch ให้ลง stderr แล้ว
+    print("✅ [DEBUG] Apollo Agent imported successfully.")
 except ImportError as e:
-    sys.stderr.write(f"❌ [DEBUG] Error importing Apollo: {e}\n")
+    print(f"❌ [DEBUG] Error importing Apollo: {e}")
     sys.exit(1)
 
 # 4. Create Server
@@ -36,10 +51,7 @@ mcp = FastMCP("Olympus - Apollo")
 
 @mcp.tool()
 def consult_knowledge_base(question: str) -> str:
-    """
-    Ask Apollo's Knowledge Guru about Business Requirements, Logic, Jira Tickets.
-    Useful for: "What is SCRUM-26?", "Explain login flow".
-    """
+    """Ask Apollo's Knowledge Guru."""
     try:
         return ask_guru(question)
     except Exception as e:
@@ -47,17 +59,20 @@ def consult_knowledge_base(question: str) -> str:
 
 @mcp.tool()
 def consult_database_stats(question: str) -> str:
-    """
-    Ask Apollo's Data Analyst to query the LIVE Database (PostgreSQL).
-    Useful for: "How many users?", "Count Jira tickets".
-    """
+    """Ask Apollo's Data Analyst."""
     try:
         return ask_database_analyst(question)
     except Exception as e:
         return f"❌ Analyst Error: {str(e)}"
 
+@mcp.tool()
+def sync_jira(issue_key: str) -> str:
+    """Sync a specific Jira ticket into Apollo's Brain."""
+    try:
+        return sync_ticket_to_knowledge_base(issue_key)
+    except Exception as e:
+        return f"❌ Sync Error (MCP Layer): {str(e)}"
+
 # 5. Run Server
 if __name__ == "__main__":
-    # 🚫 ห้าม print ตรงนี้เด็ดขาด!
-    # print("🏛️ Apollo MCP Server is running...") <--- ลบทิ้ง
     mcp.run()

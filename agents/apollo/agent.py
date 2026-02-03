@@ -89,7 +89,6 @@ def ask_database_analyst(question: str) -> str:
     except Exception as e:
         return f"❌ SQL Analyst Error: {e}"
 
-
 def ask_guru(question: str) -> str:
     """
     Expert on Business Logic & Jira Tickets.
@@ -126,6 +125,95 @@ def ask_guru(question: str) -> str:
         return f"📚 Relevant Docs found:\n{results}"
     except Exception as e:
         return f"❌ Search Error: {e}"
+
+# ✅ ฟังก์ชันใหม่: จัดการทุกอย่างแบบ One-Stop Service
+def sync_ticket_to_knowledge_base(issue_key: str) -> str:
+    """
+    Orchestrate the sync process: Read Jira -> Extract Info using LLM -> Save to Vector DB
+    """
+    logger.info(f"🔄 Syncing Ticket: {issue_key}")
+
+    # 1. อ่านข้อมูลดิบจาก Jira
+    raw_content = read_jira_ticket(issue_key)
+    if raw_content.startswith("Error:") or "Ticket not found" in raw_content:
+        return f"❌ Sync Failed: Could not read ticket {issue_key}. ({raw_content})"
+
+    # 2. ใช้สมอง (Qwen) สรุปข้อมูลให้เป็น Structured Data (เพื่อเอาไปลง DB สวยๆ)
+    # เราต้อง Prompt ให้มันถอด Business Logic ออกมา
+    extraction_prompt = [
+        {"role": "system", "content": """
+You are a Data Extractor. parsing Jira ticket content into structured JSON.
+Extract the following fields strictly:
+- summary: The title of the ticket.
+- status: The current status (e.g., To Do, Done).
+- business_logic: The core rules and requirements.
+- technical_spec: API endpoints, database changes, or technical constraints.
+- test_scenarios: Acceptance criteria or test cases mentioned.
+- issue_type: (Story, Bug, Task).
+STRICT RULES:
+1. Use double quotes (") for keys and string values.
+2. Escape inner quotes properly (e.g. "behavior": "Returns \\"Error\\" message").
+3. Do NOT use single quotes (') for JSON strings.
+4. Output JSON ONLY. No markdown, no explanations.
+"""},
+        {"role": "user", "content": f"Parse this ticket content:\n\n{raw_content}"}
+    ]
+
+    try:
+        llm_response = query_qwen(extraction_prompt)
+
+        # Handle Response Type
+        if isinstance(llm_response, dict):
+            content_text = llm_response.get('content', '') or llm_response.get('message', {}).get('content', '')
+        else:
+            content_text = str(llm_response)
+
+        # 🛡️ Safety Clean: ล้าง Markdown ออกให้เกลี้ยง (กันเหนียว)
+        content_text = content_text.strip()
+        if content_text.startswith("```json"):
+            content_text = content_text[7:]
+        if content_text.endswith("```"):
+            content_text = content_text[:-3]
+
+        content_text = content_text.strip()
+
+        # แปลงเป็น Dict
+        data = json.loads(content_text)
+
+        # 🔥 [HELPER] ฟังก์ชันช่วยแปลง Dict/List กลับเป็น String ให้ DB อ่านออก
+        def safe_serialize(obj):
+            if isinstance(obj, (dict, list)):
+                # ensure_ascii=False เพื่อเก็บภาษาไทย/Emoji ได้ถูกต้อง ไม่เป็น \uXXXX
+                return json.dumps(obj, ensure_ascii=False, indent=2)
+            return str(obj) if obj else "-"
+
+        # 3. บันทึกลง Knowledge Base
+        # สังเกตว่าเรา wrap ค่าต่างๆ ด้วย safe_serialize()
+        result = save_knowledge(
+            issue_key=issue_key,
+            summary=data.get("summary", "No Summary"),
+            status=data.get("status", "Unknown"),
+
+            # 🟢 แปลง Dict -> String ก่อนยัดลง DB
+            business_logic=safe_serialize(data.get("business_logic")),
+            technical_spec=safe_serialize(data.get("technical_spec")),
+            test_scenarios=safe_serialize(data.get("test_scenarios")),
+
+            issue_type=data.get("issue_type", "Task")
+        )
+
+        return f"✅ Synced {issue_key} successfully!\nDetails: {result}"
+
+    except json.JSONDecodeError as je:
+        logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
+        # Fallback: Save Raw Content
+        save_knowledge(issue_key, summary="Auto-Sync (JSON Error)", status="Unknown", business_logic=raw_content[:1000],
+                       technical_spec="-", test_scenarios="-", issue_type="Task")
+        return f"⚠️ Synced {issue_key} but JSON parsing failed. Saved raw content instead."
+
+    except Exception as e:
+        logger.error(f"❌ General Error: {e}")
+        return f"❌ Sync Failed: {e}"
 
 # ==============================================================================
 # 🧩 TOOLS REGISTRY
