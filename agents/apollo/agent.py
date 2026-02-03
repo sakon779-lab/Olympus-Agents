@@ -146,6 +146,10 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     real_type = ticket_data["issue_type"]  # เอาไว้ Save ลง DB
     real_summary = ticket_data["summary"]  # เอาไว้ Save ลง DB
 
+    # 🟢 [NEW] รับค่าจากที่แก้ตะกี้
+    real_parent_key = ticket_data.get("parent_key")
+    real_issue_links = ticket_data.get("issue_links")
+
     # 2. ใช้สมอง (Qwen) สรุปข้อมูลให้เป็น Structured Data (เพื่อเอาไปลง DB สวยๆ)
     # เราต้อง Prompt ให้มันถอด Business Logic ออกมา
     extraction_prompt = [
@@ -203,7 +207,9 @@ STRICT RULES:
             business_logic=safe_serialize(data.get("business_logic")),
             technical_spec=safe_serialize(data.get("technical_spec")),
             test_scenarios=safe_serialize(data.get("test_scenarios")),
-            issue_type=real_type  # ✅ จาก API
+            issue_type=real_type,  # ✅ จาก API
+            parent_key=real_parent_key,
+            issue_links=real_issue_links
         )
 
         return f"✅ Synced {issue_key} successfully!\nDetails: {result}"

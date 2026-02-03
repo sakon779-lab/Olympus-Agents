@@ -34,7 +34,7 @@ def get_knowledge_from_sql(issue_key: str) -> str:
 
 # ✅ เพิ่ม parameter: issue_type (default="Task")
 def save_knowledge(issue_key: str, summary: str, status: str, business_logic: str, technical_spec: Any,
-                   test_scenarios: Any, issue_type: str = "Task") -> str:
+                   test_scenarios: Any, issue_type: str = "Task", parent_key=None, issue_links=None) -> str:
     """
     บันทึกความรู้ลง Database (รองรับ issue_type เพื่อกัน Error NotNull)
     """
@@ -55,6 +55,8 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
         knowledge.summary = summary
         knowledge.status = status
         knowledge.issue_type = issue_type  # ✅ บันทึกค่า issue_type
+        knowledge.parent_key = parent_key
+        knowledge.issue_links = issue_links
         knowledge.business_logic = business_logic
         knowledge.technical_spec = str(technical_spec)
         knowledge.test_scenarios = str(test_scenarios)
@@ -64,11 +66,20 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
 
         # 2. Update Vector
         combined_content = f"""
+        Ticket: {issue_key}
         Type: {issue_type}
         Status: {status}
-        Business Logic: {business_logic}
-        Technical Spec: {str(technical_spec)}
-        Test Scenarios: {str(test_scenarios)}
+        Parent: {parent_key if parent_key else 'None'}
+        Links: {issue_links if issue_links else 'None'}
+
+        Business Logic: 
+        {business_logic}
+
+        Technical Spec: 
+        {str(technical_spec)}
+
+        Test Scenarios: 
+        {str(test_scenarios)}
         """
         add_ticket_to_vector(issue_key, summary, combined_content)
 

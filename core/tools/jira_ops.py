@@ -25,13 +25,51 @@ def get_jira_issue(issue_key: str) -> dict:
             data = response.json()
             fields = data.get('fields', {})
 
-            # Extract fields
+            # 1. Basic Fields (Safe Access)
             summary = fields.get('summary', 'No Summary')
-            description_adf = str(fields.get('description', ''))
+            # Handle Description carefully (API might return null)
+            desc_raw = fields.get('description')
+            description_adf = str(desc_raw) if desc_raw else ""
 
             # Handle Nested Objects safely
-            status = fields.get('status', {}).get('name', 'Unknown')
-            issue_type = fields.get('issuetype', {}).get('name', 'Task')
+            status_obj = fields.get('status') or {}
+            status = status_obj.get('name', 'Unknown') if isinstance(status_obj, dict) else str(status_obj)
+
+            type_obj = fields.get('issuetype') or {}
+            issue_type = type_obj.get('name', 'Task') if isinstance(type_obj, dict) else str(type_obj)
+
+            # 🟢 [SAFE] 2. Extract Parent Key
+            parent_obj = fields.get('parent') or {}
+            parent_key = parent_obj.get('key') if isinstance(parent_obj, dict) else None
+
+            # 🟢 [SAFE] 3. Extract Issue Links (Fix TypeError)
+            raw_links = fields.get('issuelinks', [])
+            formatted_links = []
+
+            if isinstance(raw_links, list):
+                for link in raw_links:
+                    if not isinstance(link, dict): continue  # ข้ามถ้าไม่ใช่ Dict
+
+                    # กรณี A: Outward
+                    if 'outwardIssue' in link:
+                        outward = link.get('outwardIssue', {})
+                        if isinstance(outward, dict):
+                            rel_type = link.get('type', {}).get('outward', 'relates to')
+                            target_key = outward.get('key', 'Unknown')
+                            formatted_links.append({"type": rel_type, "target": target_key, "direction": "outward"})
+
+                    # กรณี B: Inward
+                    elif 'inwardIssue' in link:
+                        inward = link.get('inwardIssue', {})
+                        if isinstance(inward, dict):
+                            rel_type = link.get('type', {}).get('inward', 'related to')
+                            target_key = inward.get('key', 'Unknown')
+                            formatted_links.append({"type": rel_type, "target": target_key, "direction": "inward"})
+
+            # Update Context for AI (AI ชอบ String อ่านง่ายๆ)
+            # เราต้องแปลงเฉพาะตอนส่งให้ AI อ่าน
+            links_text_for_ai = ", ".join(
+                [f"{l['type']} {l['target']}" for l in formatted_links]) if formatted_links else "None"
 
             # ✅ สร้าง Formatted String สำหรับส่งให้ AI อ่าน (รวมไว้ใน dict เลย)
             ai_context_text = (
@@ -39,6 +77,8 @@ def get_jira_issue(issue_key: str) -> dict:
                 f"SUMMARY: {summary}\n"
                 f"TYPE: {issue_type}\n"
                 f"STATUS: {status}\n"
+                f"PARENT: {parent_key if parent_key else 'None'}\n"
+                f"LINKS: {links_text_for_ai}\n"
                 f"REQUIREMENTS: {description_adf}"
             )
 
@@ -50,6 +90,8 @@ def get_jira_issue(issue_key: str) -> dict:
                 "status": status,
                 "issue_type": issue_type,
                 "description": description_adf,
+                "parent_key": parent_key,
+                "issue_links": formatted_links,
                 "ai_content": ai_context_text  # <-- AI เอาอันนี้ไปใช้
             }
         else:
