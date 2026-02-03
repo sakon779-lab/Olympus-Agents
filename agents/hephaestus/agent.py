@@ -4,17 +4,18 @@ import re
 import os
 import sys
 import subprocess
+import ast
 from typing import Dict, Any, List
 
 # ✅ Core Configuration & LLM
 from core.config import settings
 from core.llm_client import query_qwen
 
-# ✅ Core Tools
-from core.tools.jira_ops import read_jira_ticket
+# ✅ Core Tools (Updated)
+from core.tools.jira_ops import get_jira_issue  # ใช้ตัวใหม่ที่ return dict
 from core.tools.file_ops import read_file, write_file, append_file, list_files
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
-from core.tools.git_ops import run_git_cmd
+from core.tools.git_ops import run_git_cmd  # ใช้สำหรับ validation ภายใน
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
@@ -28,9 +29,7 @@ logger = logging.getLogger("Hephaestus")
 def run_sandbox_command(command: str, timeout: int = 300) -> str:
     """
     Executes a shell command inside the Agent's Workspace.
-    Args:
-        command: The command to run.
-        timeout: Max time in seconds (default 300s / 5 mins).
+    Handles venv activation and UTF-8 encoding automatically.
     """
     workspace = settings.AGENT_WORKSPACE
 
@@ -41,36 +40,28 @@ def run_sandbox_command(command: str, timeout: int = 300) -> str:
 
     try:
         env = os.environ.copy()
-        # เพิ่ม Workspace เข้า PYTHONPATH เพื่อให้ Python หา module เจอ
+        # เพิ่ม Workspace เข้า PYTHONPATH
         env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
 
-        # 🔧 Environment Fixes (ชุดแก้ค้าง)
-        env["PYTHONUTF8"] = "1"  # บังคับ UTF-8 (แก้ปัญหา encoding บน Windows)
-        env["PIP_NO_INPUT"] = "1"  # ห้าม pip ถาม (Important!)
+        # 🔧 Environment Fixes
+        env["PYTHONUTF8"] = "1"  # บังคับ UTF-8 (แก้ปัญหา Windows)
+        env["PIP_NO_INPUT"] = "1"  # ห้าม pip ถาม
 
         # =========================================================
-        # 🛡️ VENV AUTO-LOADER (พระเอกขี่ม้าขาว)
+        # 🛡️ VENV AUTO-LOADER (The Hero Logic)
         # =========================================================
-        # ตรวจหา .venv ใน Workspace
         venv_path = os.path.join(workspace, ".venv")
-
         if os.path.exists(venv_path):
-            # ตรวจสอบ OS เพื่อเลือก Path ให้ถูก (Windows vs Unix)
             if os.name == 'nt':  # Windows
                 venv_scripts = os.path.join(venv_path, "Scripts")
-                # python_executable = os.path.join(venv_scripts, "python.exe")
             else:  # Linux/Mac
                 venv_scripts = os.path.join(venv_path, "bin")
-                # python_executable = os.path.join(venv_scripts, "python")
 
-            # ✅ ถ้าเจอ venv ให้ยัดเข้า PATH เป็นลำดับแรก!
-            # ทำให้เวลาพิมพ์ 'python' หรือ 'pytest' มันจะเจอตัวใน venv ก่อนเสมอ
             if os.path.exists(venv_scripts):
+                # ยัดเข้า PATH เป็นลำดับแรก เพื่อให้เรียก python/pip ของ venv ก่อนเสมอ
                 env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
                 env["VIRTUAL_ENV"] = venv_path
-
-            # (Optional) Log บอกเราหน่อยว่าเจอ venv
-            logger.info(f"🔌 Activated venv at: {venv_path}")
+                # logger.info(f"🔌 Activated venv at: {venv_path}")
 
         result = subprocess.run(
             command,
@@ -78,11 +69,11 @@ def run_sandbox_command(command: str, timeout: int = 300) -> str:
             cwd=workspace,
             capture_output=True,
             text=True,
-            encoding='utf-8',  # บังคับอ่าน Output เป็น UTF-8
-            errors='replace',  # ถ้าเจออักขระแปลกๆ ให้แทนที่ด้วย ? (ไม่ให้โปรแกรมพัง)
+            encoding='utf-8',
+            errors='replace',
             env=env,
-            input="",  # ⛔ ไม้ตาย 1: ปิด Input (ตัดปัญหา Prompt รอใส่ค่า)
-            timeout=timeout  # ⛔ ไม้ตาย 2: ตัดจบเมื่อหมดเวลา
+            input="",
+            timeout=timeout
         )
 
         output = result.stdout.strip()
@@ -91,29 +82,27 @@ def run_sandbox_command(command: str, timeout: int = 300) -> str:
         if result.returncode == 0:
             return f"✅ Command Success:\n{output}"
         else:
-            # ส่ง Error กลับไปให้ Agent อ่าน (สำคัญมากสำหรับการ Debug)
             return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
 
     except subprocess.TimeoutExpired:
-        # จับได้ว่า Timeout -> ฆ่า Process ทิ้ง
-        return f"⏰ Command Timeout! (Over {timeout}s). The process was killed to prevent freezing."
+        return f"⏰ Command Timeout! (Over {timeout}s). Process killed."
 
     except Exception as e:
         return f"❌ Execution Error: {e}"
 
 
 def install_package(package_name: str) -> str:
-    """Installs a Python package in the current environment."""
+    """Installs a Python package using the sandbox environment."""
     if any(char in package_name for char in [";", "&", "|", ">"]):
         return "❌ Error: Invalid package name."
-    return run_sandbox_command(f"{sys.executable} -m pip install {package_name}")
+    return run_sandbox_command(f"pip install {package_name}")
 
 
 # ==============================================================================
 # 🧩 TOOLS REGISTRY
 # ==============================================================================
 TOOLS = {
-    "read_jira_ticket": read_jira_ticket,
+    "get_jira_issue": get_jira_issue,
     "list_files": list_files,
     "read_file": read_file,
     "git_setup_workspace": git_setup_workspace,
@@ -138,41 +127,36 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (SMART MODE: DOCKER + COMPOSE + MOCK + BEST PRACTICES)
+# 🧠 SYSTEM PROMPT
 # ==============================================================================
 SYSTEM_PROMPT = """
 You are "Hephaestus", the Senior Python Developer of Olympus.
 Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), and Submit a PR.
 
 *** CRITICAL RULES (YOU MUST FOLLOW THESE) ***
-1. ⚛️ **ATOMICITY**: ONE ACTION PER TURN. Wait for the tool result before proceeding. NO CHAINING multiple tools in one JSON.
-2. 🧠 **CONTEXT FIRST**: 
-   - BEFORE writing or editing `src/main.py` or any existing file, you MUST read the content using `read_file`.
-   - NEVER overwrite a file blindly. Always APPEND or MERGE new code while preserving existing functionality (e.g., do not delete old endpoints).
-3. 🛠️ **ENVIRONMENT SETUP (PRIORITY #1)**:
-   - Immediately after Git Setup, check for `requirements.txt`.
-   - If it exists, your FIRST action must be: `run_command("pip install -q -r requirements.txt")`.
-   - Always verify tools (`pytest`, `httpx`) are installed before running tests.
+1. ⚛️ **ATOMICITY**: ONE ACTION PER TURN. Wait for result.
+2. 🧠 **CONTEXT FIRST**: Read files before editing. NEVER overwrite blindly.
+3. 🛠️ **ENVIRONMENT SETUP**:
+   - Check for `requirements.txt`.
+   - If exists -> `run_command("pip install -q -r requirements.txt")`.
+   - Ensure `pytest`, `httpx` are installed.
 
 *** WORKFLOW ***
-1. **UNDERSTAND**: Call `read_jira_ticket(issue_key)`.
-   - **EXTRACT CONFIGS**: Look for specific Ports, Image versions, or Env Vars in the description.
+1. **UNDERSTAND**: Call `get_jira_issue(issue_key)`.
+   - Look for Ports, Image versions, and Logic in the output.
 
 2. **INIT WORKSPACE**: Call `git_setup_workspace(issue_key)`.
    - **MEMORIZE BRANCH**: Remember the branch name returned.
 
-3. **DEPENDENCIES**: 
-   - Call `list_files` to check for `requirements.txt`.
-   - If found -> `run_command("pip install -q -r requirements.txt")`.
-   - If missing tools -> `run_command("pip install pytest httpx fastapi uvicorn")`.
+3. **DEPENDENCIES**: Install requirements and tools.
 
-4. **PLAN & EXPLORE**: 
-   - Call `read_file` on target files (e.g., `src/main.py`) to understand current logic.
+4. **PLAN & EXPLORE**: `read_file` existing code.
 
 5. **CODE & TEST**: 
-   - Implement features in `src/` and tests in `tests/`.
+   - Implement in `src/`.
+   - Create tests in `tests/`.
    - `run_command("pytest tests/")`.
-   - 🛑 IF TESTS FAIL: Read the error, Fix the code, and Re-run tests until PASS.
+   - 🛑 IF TESTS FAIL: Fix and Retry.
 
 6. **CONTAINERIZE (SMART MODE)**:
    - **Task A**: `write_file("Dockerfile", content)`.
@@ -191,9 +175,8 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
 
 7. **DELIVERY**:
    - `git_commit` (Only if tests pass).
-   - `git_push(branch_name)`. 
-     *IMPORTANT*: Use the SAME branch name from Step 2. Do NOT invent a new name.
-   - `create_pr` (Leave `branch` arg empty/null).
+   - `git_push(branch_name)`.
+   - `create_pr`.
    - `task_complete`.
 
 *** 🛡️ ERROR HANDLING STRATEGIES (GIT) ***
@@ -208,10 +191,10 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
 - Create requirements.txt containing only top-level dependencies (e.g. fastapi, uvicorn, pydantic) without pinning specific versions or system packages
 - Git Push Error? -> Ensure you are pushing the CURRENT branch.
 
-
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """
+
 
 # ==============================================================================
 # 🧩 HELPER: PARSERS
@@ -237,6 +220,22 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
             pos = end_index
         except:
             pos += 1
+
+    # Fallback: ลองใช้ ast.literal_eval เผื่อ AI ตอบเป็น Python Dict string
+    if not results:
+        try:
+            matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
+            for match in matches:
+                try:
+                    # Clean up common JSON vs Python issues
+                    clean = match.replace("true", "True").replace("false", "False").replace("null", "None")
+                    obj = ast.literal_eval(clean)
+                    if isinstance(obj, dict) and "action" in obj: results.append(obj)
+                except:
+                    continue
+        except:
+            pass
+
     return results
 
 
@@ -244,13 +243,10 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # 🚀 MAIN LOOP
 # ==============================================================================
 def run_hephaestus_task(task: str, max_steps: int = 50):
-    # Enforce Identity
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
-        print(f"⚠️ Switching Identity to 'Hephaestus'...")
         settings.CURRENT_AGENT_NAME = "Hephaestus"
+
     print(f"🔨 Launching Hephaestus (The Builder)...")
-    print(f"🆔 Identity: {settings.CURRENT_AGENT_NAME}")
-    print(f"📂 Workspace: {settings.AGENT_WORKSPACE}")
     print(f"📋 Task: {task}")
 
     history = [
@@ -285,28 +281,26 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
             action = tool_call.get("action")
             args = tool_call.get("args", {})
 
+            # ---------------------------------------------------------
+            # 🛡️ TASK COMPLETION CHECK (Safety Gate) - FULL VERSION
+            # ---------------------------------------------------------
             if action == "task_complete":
                 # รับค่า mode (Default = code)
                 task_mode = args.get("mode", "code").lower()
-
                 validation_error = None
                 workspace = settings.AGENT_WORKSPACE
 
-                # ---------------------------------------------------------
-                # 🛡️ 1. Check Uncommitted Changes
-                # ---------------------------------------------------------
+                # 1. Check Uncommitted Changes
                 status = run_git_cmd("git status --porcelain", cwd=workspace)
                 if status.strip():
                     validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
 
-                # ---------------------------------------------------------
-                # 🛡️ 2. Verify Work (Mode Based)
-                # ---------------------------------------------------------
+                # 2. Verify Work (Mode Based)
                 if not validation_error:
                     current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
                     is_main = current_branch in ["main", "master"]
 
-                    # เตรียมตัวแปรไว้ก่อน กันพัง
+                    # เตรียมตัวแปร
                     source_files = []
                     config_files = []
                     test_files = []
@@ -316,14 +310,14 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                         diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
                         changed_files = diff_output.strip().splitlines()
 
-                        # ✅ Logic แยกประเภทไฟล์ (ที่หายไป ผมเติมให้แล้วครับ)
                         if changed_files:
                             has_changes = True
                             for f in changed_files:
                                 f = f.strip()
-                                # ปรับ Pattern ตาม Project Structure ของคุณ
-                                if f.startswith("src/") or f.startswith("app/") or f.endswith(
-                                        ".py") and "test" not in f:
+                                if not f: continue
+                                # แยกประเภทไฟล์
+                                if f.startswith("src/") or f.startswith("app/") or (
+                                        f.endswith(".py") and "test" not in f):
                                     source_files.append(f)
                                 elif f.startswith("tests/") or "test" in f:
                                     test_files.append(f)
@@ -340,7 +334,7 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                                 "If you made changes, did you forget to 'git push'?\n"
                                 "If this is just analysis, please use mode='analysis'."
                             )
-                        # เช็คว่าแก้แต่ Config หรือเปล่า (ถ้าเคร่งครัด)
+                        # เช็คว่าแก้แต่ Config หรือเปล่า
                         elif not source_files and (config_files or test_files):
                             validation_error = (
                                 "❌ REJECTED: No SOURCE CODE changes detected!\n"
@@ -368,7 +362,7 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                 if validation_error:
                     print(f"🚫 {validation_error}")
                     step_outputs.append(validation_error)
-                    break  # Break inner loop to return error to Agent
+                    break
                 else:
                     task_finished = True
                     result = args.get("summary", "Done")
@@ -379,7 +373,7 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # Content Detachment Logic
+            # Content Detachment Logic (Fix empty content from LLM)
             if action in ["write_file", "append_file"]:
                 if "content" not in args or len(args["content"]) < 10:
                     code_content = extract_code_block(content)
@@ -390,14 +384,13 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
             print(f"🔧 Executing: {action}")
             result = execute_tool_dynamic(action, args)
 
-            display_result = result
-            if action in ["write_file", "append_file"] and "Error" not in result:
-                display_result = f"✅ File operation success: {args.get('file_path')}"
+            # Show brief result
+            display = f"✅ File operation success: {args.get('file_path')}" if "success" in str(
+                result).lower() and action.startswith("write") else result
+            print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
 
-            print(
-                f"📄 Result: {display_result[:300]}..." if len(display_result) > 300 else f"📄 Result: {display_result}")
             step_outputs.append(f"Tool Output ({action}): {result}")
-            break
+            break  # Atomic execution
 
         if task_finished:
             print(f"\n✅ BUILD COMPLETE: {result}")
@@ -407,3 +400,11 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
         history.append({"role": "user", "content": "\n".join(step_outputs)})
 
     print("❌ FAILED: Max steps reached.")
+
+
+if __name__ == "__main__":
+    # Support command line args for testing
+    if len(sys.argv) > 1:
+        run_hephaestus_task(sys.argv[1])
+    else:
+        run_hephaestus_task("Fix bug on SCRUM-29")

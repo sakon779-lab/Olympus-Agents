@@ -12,7 +12,7 @@ from core.llm_client import query_qwen, get_langchain_llm
 from core.config import settings
 
 # ✅ Core Tools (Knowledge Only)
-from core.tools.jira_ops import read_jira_ticket
+from core.tools.jira_ops import get_jira_issue
 from core.tools.knowledge_ops import save_knowledge, get_knowledge_from_sql
 
 # ✅ Knowledge Base Integration (Vector Store)
@@ -133,10 +133,18 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     """
     logger.info(f"🔄 Syncing Ticket: {issue_key}")
 
-    # 1. อ่านข้อมูลดิบจาก Jira
-    raw_content = read_jira_ticket(issue_key)
-    if raw_content.startswith("Error:") or "Ticket not found" in raw_content:
-        return f"❌ Sync Failed: Could not read ticket {issue_key}. ({raw_content})"
+    # 1. ดึงข้อมูลครั้งเดียว (One Shot)
+    ticket_data = get_jira_issue(issue_key)
+
+    # เช็คว่า Error ไหม
+    if not ticket_data.get("success"):
+        return f"❌ Sync Failed: {ticket_data.get('error')}"
+
+    # ✅ ได้ตัวแปรครบ โดยไม่ต้องยิงรอบสอง
+    raw_content = ticket_data["ai_content"]  # ส่งให้ AI อ่าน
+    real_status = ticket_data["status"]  # เอาไว้ Save ลง DB
+    real_type = ticket_data["issue_type"]  # เอาไว้ Save ลง DB
+    real_summary = ticket_data["summary"]  # เอาไว้ Save ลง DB
 
     # 2. ใช้สมอง (Qwen) สรุปข้อมูลให้เป็น Structured Data (เพื่อเอาไปลง DB สวยๆ)
     # เราต้อง Prompt ให้มันถอด Business Logic ออกมา
@@ -187,19 +195,15 @@ STRICT RULES:
                 return json.dumps(obj, ensure_ascii=False, indent=2)
             return str(obj) if obj else "-"
 
-        # 3. บันทึกลง Knowledge Base
-        # สังเกตว่าเรา wrap ค่าต่างๆ ด้วย safe_serialize()
+        # 3. ตอน Save ก็ใช้ข้อมูลที่ดึงมาตั้งแต่รอบแรก
         result = save_knowledge(
             issue_key=issue_key,
-            summary=data.get("summary", "No Summary"),
-            status=data.get("status", "Unknown"),
-
-            # 🟢 แปลง Dict -> String ก่อนยัดลง DB
+            summary=real_summary,  # ✅ จาก API
+            status=real_status,  # ✅ จาก API
             business_logic=safe_serialize(data.get("business_logic")),
             technical_spec=safe_serialize(data.get("technical_spec")),
             test_scenarios=safe_serialize(data.get("test_scenarios")),
-
-            issue_type=data.get("issue_type", "Task")
+            issue_type=real_type  # ✅ จาก API
         )
 
         return f"✅ Synced {issue_key} successfully!\nDetails: {result}"
@@ -207,9 +211,18 @@ STRICT RULES:
     except json.JSONDecodeError as je:
         logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
         # Fallback: Save Raw Content
-        save_knowledge(issue_key, summary="Auto-Sync (JSON Error)", status="Unknown", business_logic=raw_content[:1000],
-                       technical_spec="-", test_scenarios="-", issue_type="Task")
-        return f"⚠️ Synced {issue_key} but JSON parsing failed. Saved raw content instead."
+        # ✅ ใช้ real_summary, real_status, real_type ของจริง แม้ AI จะเอ๋อ
+        save_knowledge(
+            issue_key=issue_key,
+            summary=f"[AI Error] {real_summary}",  # แปะป้ายบอกหน่อยว่า AI พัง แต่ยังเก็บชื่อเดิมไว้
+            status=real_status,  # ✅ ใช้ของจริง
+            business_logic=f"⚠️ AI Parsing Failed. Raw Content:\n{raw_content[:2000]}",  # เก็บเนื้อหาดิบไว้ debug
+            technical_spec="-",
+            test_scenarios="-",
+            issue_type=real_type  # ✅ ใช้ของจริง
+        )
+
+        return f"⚠️ Synced {issue_key} (Metadata OK, but AI Analysis failed). Saved raw content."
 
     except Exception as e:
         logger.error(f"❌ General Error: {e}")
@@ -219,10 +232,9 @@ STRICT RULES:
 # 🧩 TOOLS REGISTRY
 # ==============================================================================
 TOOLS = {
-    "read_jira_ticket": read_jira_ticket,
-    "save_knowledge": save_knowledge,
     "ask_guru": ask_guru,             # ถามความรู้ (Docs/Jira/Internal SQL)
-    "ask_database_analyst": ask_database_analyst # ถามข้อมูลจริง (External Postgres)
+    "ask_database_analyst": ask_database_analyst, # ถามข้อมูลจริง (External Postgres)
+    "sync_ticket": sync_ticket_to_knowledge_base
 }
 
 def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
@@ -266,8 +278,7 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 3. **PRIORITY**: Answer the question directly based on tool output.
 
 *** 🛠️ TOOLS AVAILABLE ***
-- read_jira_ticket(issue_key)
-- save_knowledge(issue_key, summary, status, business_logic, technical_spec, test_scenarios, issue_type)
+- sync_ticket(issue_key)  <-- 🟢 เพิ่มตรงนี้
 - ask_guru(question)
 - ask_database_analyst(question)
 - task_complete(summary)

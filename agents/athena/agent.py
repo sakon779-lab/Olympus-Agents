@@ -10,10 +10,10 @@ from typing import Dict, Any, List
 from core.config import settings
 from core.llm_client import query_qwen
 
-# ✅ Core Tools
-from core.tools.jira_ops import read_jira_ticket
+# ✅ Core Tools (ใช้ตัวใหม่)
+from core.tools.jira_ops import get_jira_issue
 from core.tools.file_ops import read_file, list_files
-from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr
+from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Athena] %(message)s')
@@ -28,8 +28,12 @@ def save_test_design(filename: str, content: str) -> str:
     """Saves Test Scenarios (CSV) to the QA Repo."""
     try:
         if not filename.endswith('.csv'): filename += ".csv"
+        # ใช้ Path จาก settings หรือจะใช้ workspace ก็ได้ แต่แยก folder ไว้ก็ดี
         target_dir = settings.TEST_DESIGN_DIR
         full_path = os.path.join(target_dir, filename)
+
+        # ตรวจสอบว่า target_dir อยู่ใน workspace หรือไม่ ถ้าไม่ อาจต้องปรับ path
+        # กรณีนี้สมมติว่า TEST_DESIGN_DIR ถูก set ไว้ถูกต้องใน config แล้ว
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
         # Clean logic: Remove markdown code blocks
@@ -48,13 +52,14 @@ def save_test_design(filename: str, content: str) -> str:
 
 
 TOOLS = {
-    "read_jira_ticket": read_jira_ticket,
+    "get_jira_issue": get_jira_issue,
     "list_files": list_files,
     "read_file": read_file,
     "git_setup_workspace": git_setup_workspace,
     "git_commit": git_commit,
     "git_push": git_push,
     "create_pr": create_pr,
+    "git_pull": git_pull,  # ✅ เพิ่ม git_pull เข้าไปใน TOOLS ด้วย เผื่อ AI เรียกใช้ตอนแก้ conflict
     "save_test_design": save_test_design
 }
 
@@ -71,7 +76,6 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
 # ==============================================================================
 # 🧠 SYSTEM PROMPT (Strict Signature & Detachment)
 # ==============================================================================
-# ใช้ตัวแปรนี้เพื่อไม่ให้ Chat UI สับสนกับ Code Block
 CSV_BLOCK_START = "```" + "csv"
 CSV_BLOCK_END = "```"
 
@@ -90,12 +94,13 @@ Your goal is to design Data-Driven Test Cases (CSV) based on Jira Requirements.
 
 *** 🛠️ TOOL SIGNATURES (STRICT) ***
 You MUST use these exact argument names:
-1. `read_jira_ticket(issue_key)`
+1. `get_jira_issue(issue_key)`
 2. `git_setup_workspace(issue_key)`
 3. `save_test_design(filename, content)`
 4. `git_commit(message)`
 5. `git_push(branch_name)`
 6. `create_pr(title, body)`
+7. `git_pull(branch_name)` (Use if push fails)
 
 *** ⚡ CONTENT DELIVERY RULE (CRITICAL) ***
 When calling `save_test_design`, do NOT put the CSV inside the JSON.
@@ -117,7 +122,7 @@ TC-001, Positive, Verify API, Mock: None, Call GET /api, 200 OK
   4. Only then, proceed to `create_pr`.
 
 *** ⚡ WORKFLOW (STRICT ORDER) ***
-1. `read_jira_ticket` -> Wait for result.
+1. `get_jira_issue` -> Wait for result.
 2. `git_setup_workspace` -> Wait for result.
 3. `save_test_design` (MUST include CSV block) -> Wait for result.
 4. `git_commit` -> Wait for result.
@@ -150,6 +155,7 @@ def extract_code_block(text: str) -> str:
 
 
 def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
+    """Robust JSON extraction including Python Dict fallback."""
     results = []
     decoder = json.JSONDecoder()
     pos = 0
@@ -164,6 +170,21 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
             pos = end_index
         except:
             pos += 1
+
+    # ✅ Robust Fallback: Handle Python dicts (Single quotes)
+    if not results:
+        try:
+            matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
+            for match in matches:
+                try:
+                    clean = match.replace("true", "True").replace("false", "False").replace("null", "None")
+                    obj = ast.literal_eval(clean)
+                    if isinstance(obj, dict) and "action" in obj: results.append(obj)
+                except:
+                    continue
+        except:
+            pass
+
     return results
 
 
@@ -173,7 +194,6 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 def run_athena_task(task: str, max_steps: int = 20):
     # Enforce Identity
     if settings.CURRENT_AGENT_NAME != "Athena":
-        print(f"⚠️ Switching Identity to 'Athena'...")
         settings.CURRENT_AGENT_NAME = "Athena"
 
     print(f"🦉 Launching Athena (Test Architect)...")
@@ -257,3 +277,10 @@ def run_athena_task(task: str, max_steps: int = 20):
         history.append({"role": "user", "content": "\n".join(step_outputs)})
 
     print("❌ FAILED: Max steps reached.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        run_athena_task(sys.argv[1])
+    else:
+        run_athena_task("Design QA for SCRUM-29")
