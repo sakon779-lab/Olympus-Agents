@@ -55,6 +55,8 @@ def ask_database_analyst(question: str) -> str:
                 "❌ FORMAT ERROR: You forgot to specify the tool! "
                 "You MUST output 'Action: sql_db_query' before the 'Action Input'. "
                 "Try again!"
+                "❌ SYNTAX ERROR: You probably used Markdown code blocks (```sql). "
+                "Please Output RAW SQL only. Do NOT wrap it in backticks."
             )
         )
 
@@ -72,6 +74,9 @@ def ask_database_analyst(question: str) -> str:
             f"   Action: [Tool Name] (or 'Final Answer' if done)\n"
             f"   Action Input: [SQL Query or Answer Text]\n"
             f"3. **No Chatting**: Do not start with 'Here is the query'. Start directly with 'Thought:'.\n\n"
+            f"4. **NO MARKDOWN**: Do NOT wrap the SQL in ```sql ... ``` or ` ... `. \n"
+            f"   - ❌ WRONG: ```sql SELECT * FROM table ``` \n"
+            f"   - ✅ RIGHT: SELECT * FROM table \n\n"
             f"🧠 THINKING PROTOCOL (Must follow):\n"
             f"1. **Analyze Intent**: Does the user want to Count? List? Sum? or Check details?\n"
             f"2. **Identify Table**: Look for the most relevant table based on keywords.\n"
