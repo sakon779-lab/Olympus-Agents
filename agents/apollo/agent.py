@@ -37,28 +37,50 @@ def ask_database_analyst(question: str) -> str:
         # sample_rows_in_table_info=0 เพื่อลดเวลาโหลด Schema
         app_db = SQLDatabase.from_uri(settings.DATABASE_URI, sample_rows_in_table_info=0)
 
+        # 🟢 [NEW] 1.5 ดึง Schema ล่าสุดออกมาเป็น Text (Dynamic!)
+        # คำสั่งนี้จะวิ่งไปอ่าน Postgres ว่ามีตารางอะไรบ้าง + Column อะไรบ้าง
+        # แล้วแปลงเป็น String (CREATE TABLE...) ให้เรา
+        database_schema = app_db.get_table_info()
+
         # 2. Setup Agent
         agent_llm = get_langchain_llm(temperature=0)
         sql_agent_executor = create_sql_agent(
             llm=agent_llm,
             db=app_db,
             agent_type="zero-shot-react-description",
-            verbose=False,
-            handle_parsing_errors=True
+            verbose=True,  # เปิด True ช่วย debug ใน console (แต่อย่า print ออก stdout ของ server)
+            # ✅ เพิ่ม Custom Error Message เวลา AI เอ๋อ
+            # ✅ ปรับ Error Handling ให้บอกวิธีแก้ Format ทันที
+            handle_parsing_errors=(
+                "❌ FORMAT ERROR: You forgot to specify the tool! "
+                "You MUST output 'Action: sql_db_query' before the 'Action Input'. "
+                "Try again!"
+            )
         )
 
         # 3. Dynamic Prompt (บังคับให้คิดก่อนทำ)
         forced_prompt = (
             f"Role: You are an Intelligent SQL Data Analyst.\n"
             f"Goal: Answer the user's question accurately using the PostgreSQL database.\n\n"
+            f"⚡ **LIVE DATABASE SCHEMA**:\n"
+            f"{database_schema}\n\n"  # <--- 🟢 ยัด Schema ของจริงใส่ตรงนี้เลย!
+            f"⚠️ **CRITICAL INSTRUCTIONS**:\n"
+            f"1. **Tools**: You have access to tools like `sql_db_query`, `sql_db_schema`, etc.\n"
+            f"   - Since the schema is provided above, you usually just need `sql_db_query`.\n"
+            f"2. **Format**: You MUST use the standard ReAct format:\n"
+            f"   Thought: [Your reasoning]\n"
+            f"   Action: [Tool Name] (or 'Final Answer' if done)\n"
+            f"   Action Input: [SQL Query or Answer Text]\n"
+            f"3. **No Chatting**: Do not start with 'Here is the query'. Start directly with 'Thought:'.\n\n"
             f"🧠 THINKING PROTOCOL (Must follow):\n"
             f"1. **Analyze Intent**: Does the user want to Count? List? Sum? or Check details?\n"
             f"2. **Identify Table**: Look for the most relevant table based on keywords.\n"
             f"3. **Inspect Data (Crucial)**: Run `SELECT DISTINCT column FROM table LIMIT 10` first if filtering by text.\n"
             f"4. **Execute Final Query**: Execute specific SQL.\n\n"
             f"Question: {question}\n\n"
+            # 🔥 Pre-fill แค่จุดเริ่มต้น เพื่อกระตุ้นให้เข้า Format (แต่ไม่บังคับ Action)
             f"Let's think step by step.\n"
-            f"Action:"
+            f"Thought:"
         )
 
         result = sql_agent_executor.invoke(forced_prompt)
@@ -134,21 +156,21 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     # 2. ใช้สมอง (Qwen) สรุปข้อมูล
     extraction_prompt = [
         {"role": "system", "content": """
-You are a Data Extractor parsing Jira ticket content into structured JSON.
-Extract the following fields strictly:
-- summary: The title of the ticket.
-- status: The current status (e.g., To Do, Done).
-- business_logic: The core rules and requirements.
-- technical_spec: API endpoints, database changes, or technical constraints.
-- test_scenarios: Acceptance criteria or test cases mentioned.
-- issue_type: (Story, Bug, Task).
-
-STRICT RULES:
-1. Use double quotes (") for keys and string values.
-2. Escape inner quotes properly (e.g. "behavior": "Returns \\"Error\\" message").
-3. Do NOT use single quotes (') for JSON strings.
-4. Output JSON ONLY. No markdown, no explanations.
-"""},
+        You are a Data Extractor parsing Jira ticket content into structured JSON.
+        Extract the following fields strictly:
+        - summary: The title of the ticket.
+        - status: The current status (e.g., To Do, Done).
+        - business_logic: The core rules and requirements.
+        - technical_spec: API endpoints, database changes, or technical constraints.
+        - test_scenarios: Acceptance criteria or test cases mentioned.
+        - issue_type: (Story, Bug, Task).
+        
+        STRICT RULES:
+        1. Use double quotes (") for keys and string values.
+        2. Escape inner quotes properly (e.g. "behavior": "Returns \\"Error\\" message").
+        3. Do NOT use single quotes (') for JSON strings.
+        4. Output JSON ONLY. No markdown, no explanations.
+        """},
         {"role": "user", "content": f"Parse this ticket content:\n\n{raw_content}"}
     ]
 
@@ -248,13 +270,12 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 
 3. **CASE: User asks to MEMORIZE / SYNC** 📥
    - Examples: "Sync SCRUM-27", "Read this ticket".
-   - ✅ ACTION: `read_jira_ticket` -> `save_knowledge`.
+   - ✅ ACTION: Use `sync_ticket(issue_key)`.
 
 *** ⚠️ RULES ***
 - Do NOT guess. If you need stats, ask the analyst.
 - If you need content, ask the guru.
 - Output JSON format only.
-   - ✅ ACTION: Use `sync_ticket(issue_key)`.
 
 *** ⚠️ CRITICAL RULES ***
 1. **ATOMICITY**: One tool per turn. Wait for result.
