@@ -46,7 +46,8 @@ def query_qwen(messages: list, temperature: float = 0.2) -> str:
         "stream": True,
         "temperature": temperature,
         "options": {
-            "num_ctx": 4096,
+            # "num_ctx": 4096,
+            "num_ctx": 8192,
             "num_predict": -1
         }
     }

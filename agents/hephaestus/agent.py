@@ -191,6 +191,13 @@ Your goal is to complete Jira tasks, Verify with Tests, CONTAINERIZE (Compose), 
 - Create requirements.txt containing only top-level dependencies (e.g. fastapi, uvicorn, pydantic) without pinning specific versions or system packages
 - Git Push Error? -> Ensure you are pushing the CURRENT branch.
 
+*** ⚠️ CRITICAL JSON RULES (YOU MUST FOLLOW) ***
+1. **NO TRIPLE QUOTES**: Do NOT use `\"\"\"` inside JSON strings. It is invalid.
+2. **ESCAPE NEWLINES**: For multi-line code, you MUST use `\\n` explicitly.
+   - ❌ WRONG: "content": \"\"\"def func():\n    pass\"\"\"
+   - ✅ RIGHT: "content": "def func():\\n    pass"
+3. **ATOMICITY**: ONE ACTION PER TURN.
+
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """
