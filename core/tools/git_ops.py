@@ -265,21 +265,36 @@ def git_pull(branch_name: str = None) -> str:
         return f"❌ Pull Error: {e}"
 
 
-def create_pr(title: str, body: str, branch: str = None) -> str:
+def create_pr(title: str, body: str = "Automated PR by Hephaestus", base_branch: str = "main",
+              head_branch: str = None) -> str:
+    """
+    Creates a Pull Request using GitHub CLI (gh).
+    Supports defining base_branch and head_branch explicitly.
+    """
     workspace = settings.AGENT_WORKSPACE
     try:
         if not shutil.which("gh"):
             return "❌ Error: GitHub CLI ('gh') is not installed."
 
-        # ✅ Check Current Branch
-        if not branch:
-            branch = run_git_cmd("git branch --show-current", cwd=workspace)
+        # ✅ 1. Determine Head Branch (Source)
+        # ถ้า AI ไม่ส่ง head_branch มา ให้ใช้ Current Branch
+        if not head_branch:
+            head_branch = run_git_cmd("git branch --show-current", cwd=workspace).strip()
 
-        cmd = f'gh pr create --title "{title}" --body "{body}" --head "{branch}" --base "main"'
+        # ✅ 2. Construct Command
+        # รับค่า base_branch มาจาก Argument (Default='main')
+        cmd = f'gh pr create --title "{title}" --body "{body}" --head "{head_branch}" --base "{base_branch}"'
+
+        logger.info(f"🔀 Creating PR: {head_branch} -> {base_branch}")
         output = run_git_cmd(cmd, cwd=workspace)
 
         return f"✅ PR Created: {output}"
+
     except Exception as e:
-        if "already exists" in str(e):
-            return f"✅ PR already exists."
+        error_msg = str(e).lower()
+        if "already exists" in error_msg:
+            return f"⚠️ PR already exists (Skipped creation)."
+        if "no commits between" in error_msg:
+            return f"⚠️ No changes to merge (Skipped creation)."
+
         return f"❌ PR Error: {e}"
