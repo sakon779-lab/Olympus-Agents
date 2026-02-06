@@ -1,3 +1,5 @@
+import core.network_fix
+import asyncio
 import json
 import logging
 import re
@@ -13,7 +15,7 @@ from core.llm_client import query_qwen
 
 # ✅ Core Tools (Updated)
 from core.tools.jira_ops import get_jira_issue  # ใช้ตัวใหม่ที่ return dict
-from core.tools.file_ops import read_file, write_file, append_file, list_files
+from core.tools.file_ops import read_file, write_file, append_file, list_files, edit_file
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
 from core.tools.git_ops import run_git_cmd  # ใช้สำหรับ validation ภายใน
 
@@ -105,6 +107,7 @@ TOOLS = {
     "get_jira_issue": get_jira_issue,
     "list_files": list_files,
     "read_file": read_file,
+    "edit_file": edit_file,
     "git_setup_workspace": git_setup_workspace,
     "git_commit": git_commit,
     "git_push": git_push,
@@ -157,10 +160,18 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 2. 💾 **NO TRIPLE QUOTES**: Do NOT use `\"\"\"` inside JSON strings. Use `\\n` for newlines.
    - ❌ WRONG: "content": \"\"\"def func():...\"\"\"
    - ✅ RIGHT: "content": "def func():\\n    pass"
-3. 🤝 **MERGE, DON'T OVERWRITE**:
-   - Before writing to `src/main.py`, ALWAYS `read_file` first.
-   - Your `write_file` content MUST include the **OLD code + NEW code**.
-   - If you overwrite and lose old endpoints (e.g., `/hello`), you FAILED.
+3. 🤝 **SMART EDITING (THE GOLDEN RULE)**:
+    3.1. **To MODIFY existing code** (Change logic, fix bugs):
+       - Use `edit_file`.
+       - Pattern: Find the EXACT failing code block -> Replace with fixed code.
+    
+    3.2. **To INSERT code in the middle** (Add imports, add class methods):
+       - Use `edit_file`.
+       - Pattern: Find an "Anchor" line (e.g., the line before insertion) -> Replace it with "Anchor + New Code".
+    
+    3.3. **To ADD NEW features at the bottom** (New endpoints, new classes):
+       - Use `append_file`.
+       - This is the SAFEST way to add new features without breaking old ones.
 4. 🕵️ **VERIFY BEFORE COMMIT**:
    - If `git status` says "nothing to commit", you likely overwrote the file with the same content or failed to save.
    - Check if you *actually* implemented the logic requested in the Jira ticket.
@@ -168,6 +179,12 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - Output the JSON action **ONLY ONCE**.
    - Do NOT repeat the JSON block at the end of your response.
    - Do NOT say "Please execute...". Just output the JSON.
+6. 🧠 **CHAIN OF THOUGHT (REQUIRED)**:
+   - Before outputting JSON, you MUST write a ONE-SENTENCE thought about your current state.
+   - Example: "Workspace is ready. Now I will fetch the Jira ticket to get requirements."
+   - Example: "Spec file created. Now I will read existing code to plan the implementation."
+   - This helps you track progress and avoid loops.
+7. **After outputting any code or text block, you MUST immediately call write_file to save it. Do not just show it to me**
 
 *** 🔄 WORKFLOW (STRICT ORDER) ***
 
@@ -175,21 +192,17 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - Call `git_setup_workspace(issue_key)`.
    - **MEMORIZE** the branch name.
 
-2. **PHASE 2: DISCOVERY & SPECIFICATION** <-- 🔵 แล้วค่อยทำอันนี้
+2. **PHASE 2: DISCOVERY & SPECIFICATION**
    - Call `get_jira_issue(issue_key)`.
-   - **CRITICAL STEP**: Create a file `docs/specs.md`.
-     - Content MUST summarize: User Story, Acceptance Criteria...
-     - 🛑 **STOP & THINK**: Does this Spec match the Jira Ticket exactly?
+   - **MANDATORY**: You MUST write `docs/specs.md` immediately.
+   - ⚠️ **SYSTEM LOCK**: Access to `src/` and `tests/` directories is **LOCKED** until `docs/specs.md` exists on disk.
+   - If you try to write code before specs, the system will reject your request.
 
-3. **PHASE 3: ENVIRONMENT SETUP**
-   - Check for `requirements.txt`.
-   - If exists -> `run_command("pip install -q -r requirements.txt")`.
-   - Ensure `pytest`, `httpx` are installed (run `pip install` if missing).
-
-4. **PHASE 4: EXPLORE**
+3. **PHASE 3: EXPLORE**
    - Call `read_file` on existing `src/main.py` and `tests/` to understand the legacy code context.
 
-5. **PHASE 5: TDD CYCLE (The Core Work)**
+4. **PHASE 4: TDD CYCLE (The Core Work)**
+   - ⚠️ **REFRESH MEMORY**: Before starting a new test, Call `read_file("docs/specs.md")` to keep requirements fresh in your mind.
    - **Step A (RED)**: Create/Update `tests/test_api.py` with a test for the NEW feature (based on `docs/specs.md`).
    - **Step B**: Run `pytest`. Expect FAILURE (or error).
    - **Step C**: Read `src/main.py` (again, to be safe).
@@ -197,9 +210,9 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - **Step E**: Run `pytest`. Expect SUCCESS.
    - *Repeat until all requirements in `docs/specs.md` are met.*
 
-6. **PHASE 6: CONTAINERIZE**
+5. **PHASE 5: CONTAINERIZE**
    - **Task A**: `write_file("Dockerfile", content)`.
-     - Base Image: Use value from Jira. IF NONE -> Default `python:3.9-slim`.
+     - Base Image: Use value from Jira. IF NONE -> Default `python:3.10-slim`.
      - Port: Use value from Jira. IF NONE -> Default `8000`.
      - Cmd: `uvicorn src.main:app --host 0.0.0.0 --port {PORT}`.
    - **Task B**: `write_file("docker-compose.yml", content)`.
@@ -209,7 +222,7 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
      - Env: Set `MOCK_SERVER_URL=http://mockserver:1080` in `api`.
    - (Optional) Verify: `run_command("docker compose config")`.
 
-7. **PHASE 7: DELIVERY**
+6. **PHASE 6: DELIVERY**
    - `run_command("pytest")` one last time.
    - `git_commit` (Message: "Feat: Implement [Ticket-ID] ...").
    - `git_push(branch_name)`.
@@ -221,6 +234,25 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 - **Tests Failed?** -> Read the error. Fix the code. Retry.
 - **Git Nothing to commit?** -> You might have missed implementing the file or the file matches exactly. Review your changes.
 - **JSON Error?** -> Remember to escape quotes (`\"`) and newlines (`\\n`).
+- **Edit Failed (Not Found)?** -> You probably mistyped the `target_text`. Read the file again and copy-paste exactly.
+- **If you think 'Spec file created' but you haven't called write_file in this turn, YOU ARE HALLUCINATING. Call write_file now.**
+
+*** FILE WRITING & EDITING RULES (STRICT) ***
+
+1. 📝 **WRITE/APPEND (New Files/Adding Endpoints)**:
+   - **Step 1:** Write the full content inside a Markdown code block (```python ... ```).
+   - **Step 2:** Call the tool with `"content": "LAST_CODE_BLOCK"`.
+   - 🚫 **NEVER** put long code inside the JSON string.
+
+2. ✂️ **EDIT (Modifying Existing Code)**:
+   - **Step 1:** Write the NEW code (Replacement) inside a Markdown code block.
+   - **Step 2:** Call `edit_file` with:
+     - `target_text`: Put the exact existing string here (inside JSON). Keep it short (unique anchor) to avoid escaping issues.
+     - `replacement_text`: "LAST_CODE_BLOCK".
+
+3. ⚠️ **FILENAME RULE**: 
+   - Spec file must be `docs/specs.md`.
+   - Python files must be in `src/` or `tests/`.
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
@@ -299,11 +331,75 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
 
         print(f"🤖 Hephaestus: {content[:100]}...")
 
+        # =========================================================
+        # 🟢 [แทรกตรงนี้ 1] ดึง Code Block ล่าสุดเตรียมไว้
+        # =========================================================
+        # ดึง Code Block ทั้งหมด
+        all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
+
+        last_code_block = ""
+        # วนลูปหา Block สุดท้าย ที่ "ไม่ใช่" JSON Action ของเรา
+        for block in reversed(all_blocks):
+            # ถ้าใน Block มีคำว่า "action": หรือ "write_file" แปลว่าเป็น Command ของ Agent เอง ไม่ใช่ Code
+            if '"action":' in block or '"write_file"' in block:
+                continue
+            # ถ้าไม่ใช่ JSON Command ให้ถือว่าเป็น Code ที่จะเอาไปใช้งาน
+            last_code_block = block
+            break
+        # =========================================================
+
         tool_calls = _extract_all_jsons(content)
 
-        if not tool_calls:
-            history.append({"role": "assistant", "content": content})
-            continue
+        # =========================================================
+        # 🚑 SMART RECOVERY (ซ่อม JSON อัตโนมัติ)
+        # =========================================================
+        # ถ้า JSON พัง แต่เราเห็นความตั้งใจ (Action + File Path + Code Block)
+        if not tool_calls and ('"action":' in content or "```json" in content):
+            print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
+
+            # 1. พยายามแกะ Action และ File Path ด้วย Regex (ไม่ง้อ JSON Parser)
+            # หาคำว่า "action": "write_file" (รองรับช่องว่าง)
+            action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
+            # หาคำว่า "file_path": "..." (รองรับช่องว่าง)
+            path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
+
+            recovered = False
+
+            # 2. ถ้าข้อมูลครบองค์ประชุม (Action + Path + Markdown Block) -> ลุยเลย!
+            if action_match and path_match and last_code_block:
+                found_action = action_match.group(1)
+                found_path = path_match.group(1)
+
+                # รองรับเฉพาะ write/append (edit_file เสี่ยงไปถ้าแกะ target ไม่ได้)
+                if found_action in ["write_file", "append_file"]:
+                    print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path} using Last Code Block.")
+
+                    # สร้าง Tool Call เทียมขึ้นมา
+                    tool_calls = [{
+                        "action": found_action,
+                        "args": {
+                            "file_path": found_path,
+                            "content": last_code_block  # ยัด Code Block ใส่ปากเลย
+                        }
+                    }]
+                    recovered = True
+
+            # 3. ถ้าซ่อมไม่ได้จริงๆ (เช่น เป็น edit_file หรือหา path ไม่เจอ) -> ค่อยด่าตามเดิม
+            if not recovered:
+                print("❌ Recovery Failed. Sending Error Message.")
+                history.append({"role": "assistant", "content": content})
+
+                error_msg = (
+                    "❌ SYSTEM ERROR: JSON Validation Failed!\n"
+                    "🛑 STOP putting large text in JSON fields.\n"
+                    "👉 FIX: Write code in a Markdown block first, then send JSON with 'content': 'LAST_CODE_BLOCK'."
+                )
+
+                history.append({
+                    "role": "user",
+                    "content": error_msg
+                })
+                continue
 
         # 🟢 [FIX] เพิ่ม Logic กรองคำสั่งซ้ำ (Deduplicate)
         # แก้ปัญหา AI พูดติดอ่าง (Output JSON เดิมซ้ำ 2 รอบ)
@@ -316,7 +412,7 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                 seen_tools.add(tool_str)
                 unique_tools.append(tool)
 
-            tool_calls = unique_tools
+        tool_calls = unique_tools
 
         step_outputs = []
         task_finished = False
@@ -417,13 +513,75 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # Content Detachment Logic (Fix empty content from LLM)
-            if action in ["write_file", "append_file"]:
-                if "content" not in args or len(args["content"]) < 10:
-                    code_content = extract_code_block(content)
-                    if code_content:
-                        args["content"] = code_content
-                        print("📝 Extracted content from Markdown block.")
+            # =========================================================
+            # 🟢 [แก้ตรงนี้ 2] แทนที่ Logic เดิมด้วยอันนี้
+            # =========================================================
+            if action == "edit_file":
+                # ให้ AI ส่ง replacement="LAST_CODE_BLOCK" ได้เหมือนกัน
+                if args.get("replacement_text") == "LAST_CODE_BLOCK":
+                    if last_code_block:
+                        args["replacement_text"] = last_code_block
+                        print(f"✏️ Auto-attached replacement text from Markdown block.")
+                    else:
+                        print("⚠️ Warning: edit_file called but no code block found.")
+            elif action in ["write_file", "append_file"]:
+                # เงื่อนไข: ถ้า content ว่าง, หรือสั้นผิดปกติ, หรือ AI บอกให้ใช้ Block ล่าสุด
+                current_content = args.get("content", "")
+                if not current_content or len(current_content) < 10 or current_content == "LAST_CODE_BLOCK":
+                    if last_code_block:
+                        args["content"] = last_code_block
+                        print(f"📝 Auto-attached content from Markdown block to {args.get('file_path')}")
+                    else:
+                        print("⚠️ Warning: write_file called but no code block found.")
+            # =========================================================
+
+            # =========================================================
+            # 🛡️ 1. FILENAME GUARDRAIL (ดักชื่อไฟล์ผิด) <-- เพิ่มตรงนี้
+            # =========================================================
+            if action in ["write_file", "edit_file", "append_file"]:
+                target_file = args.get("file_path", "").replace("\\", "/")  # Normalize path
+
+                # กฎ: ถ้าเขียนลง docs/ ต้องชื่อ specs.md เท่านั้น
+                if target_file.startswith("docs/") and target_file != "docs/specs.md":
+                    print(f"🚫 BLOCKED: Wrong spec filename '{target_file}'")
+                    error_msg = (
+                        f"❌ FILENAME ERROR: You are trying to write to '{target_file}'.\n"
+                        f"⚠️ STANDARD VIOLATION: The spec file MUST be named exactly 'docs/specs.md'.\n"
+                        f"👉 ACTION: Rename the file path to 'docs/specs.md' and try again."
+                    )
+                    step_outputs.append(error_msg)
+                    history.append({"role": "assistant", "content": content})
+                    history.append({"role": "user", "content": error_msg})
+                    continue  # 🛑 หยุดทันที
+
+            # =========================================================
+            # 2️⃣ SPEC GUARDRAIL (อันใหม่ - เพิ่มต่อท้ายตรงนี้!)
+            # =========================================================
+            if action in ["write_file", "edit_file", "append_file"]:
+                target_file = args.get("file_path", "")
+
+                # เช็คว่าไฟล์ที่จะเขียนคือ Source Code หรือ Test หรือไม่
+                if target_file.startswith("src/") or target_file.startswith("tests/"):
+
+                    # เช็คว่ามีไฟล์ Spec หรือยัง?
+                    spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
+                    if not os.path.exists(spec_path):
+                        # 🚫 ถ้ายังไม่มี Spec -> บล็อกทันที!
+                        print(f"🚫 BLOCKED: Attempt to modify code without specs.md")
+                        error_msg = (
+                            "❌ SYSTEM POLICY VIOLATION: You CANNOT modify 'src/' or 'tests/' yet.\n"
+                            "⚠️ REASON: The file 'docs/specs.md' does not exist on disk.\n"
+                            "👉 ACTION REQUIRED: You MUST write the 'docs/specs.md' file first to define the requirements.\n"
+                            "Please execute write_file('docs/specs.md', content) now."
+                        )
+
+                        # บันทึก Error ลง History เพื่อให้ AI รู้ตัว
+                        step_outputs.append(error_msg)
+                        history.append({"role": "assistant", "content": content})
+                        history.append({"role": "user", "content": error_msg})
+                        continue  # 🚀 ข้ามการทำงานรอบนี้ไปเลย (ไม่รัน execute_tool_dynamic)
+
+            # =========================================================
 
             print(f"🔧 Executing: {action}")
             result = execute_tool_dynamic(action, args)

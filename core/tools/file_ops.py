@@ -58,16 +58,54 @@ def append_file(file_path: str, content: str) -> str:
     try:
         full_path = _get_safe_path(file_path)
         if not os.path.exists(full_path):
-            return f"❌ Error: File {full_path} does not exist. Use write_file first."
+            return f"❌ Error: File {file_path} does not exist. Use write_file to create it."
+
+        # อ่านก่อนเพื่อให้แน่ใจว่ามี newline ตอนจบ
+        with open(full_path, "r", encoding="utf-8") as f:
+            existing_content = f.read()
+
+        prefix = "\n" if not existing_content.endswith("\n") else ""
 
         with open(full_path, "a", encoding="utf-8") as f:
-            f.write("\n" + content)
+            f.write(prefix + content)
 
-        logger.info(f"➕ File Appended to: {full_path}")
-        return f"✅ File Appended: {full_path}"
+        return f"✅ Appended to {file_path}"
     except Exception as e:
-        return f"❌ Error appending file: {e}"
+        return f"❌ Error appending: {e}"
 
+
+def edit_file(file_path: str, target_text: str, replacement_text: str) -> str:
+    """
+    Replace specific text in a file with new text.
+    Safe: Will fail if target_text is not found or is ambiguous.
+    """
+    try:
+        full_path = _get_safe_path(file_path)  # ใช้ฟังก์ชันเดิมที่คุณมีเพื่อ validate path
+
+        if not os.path.exists(full_path):
+            return f"❌ Error: File not found: {file_path}"
+
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # 🛡️ SAFETY CHECKS
+        if target_text not in content:
+            return "❌ Error: 'target_text' not found in file. Please Read file first and ensure EXACT match."
+
+        if content.count(target_text) > 1:
+            return "❌ Error: 'target_text' is ambiguous (found multiple times). Include more context lines."
+
+        # ✅ EXECUTE REPLACEMENT
+        new_content = content.replace(target_text, replacement_text)
+
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        logger.info(f"✏️ File Edited: {full_path}")
+        return f"✅ File edited successfully: {file_path}"
+
+    except Exception as e:
+        return f"❌ Error editing file: {e}"
 
 def list_files(directory: str = ".") -> str:
     try:

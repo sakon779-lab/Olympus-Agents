@@ -39,7 +39,8 @@ class Settings(BaseSettings):
     QA_AGENT_NAMES: List[str] = ["Athena", "Artemis"]
 
     # ✅ AI CONFIGURATION
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    # OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_BASE_URL: str = "https://l83lnu9nu2pig6-11434.proxy.runpod.net"
     # แนะนำใช้ 7b ถ้าเครื่อง RAM น้อย หรือ 14b ถ้าเครื่องแรง
     MODEL_NAME: str = "qwen2.5-coder:14b"
 

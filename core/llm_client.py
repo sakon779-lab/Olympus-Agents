@@ -29,7 +29,7 @@ def get_langchain_llm(temperature: float = 0):
     )
 
 
-def query_qwen(messages: list, temperature: float = 0.2) -> str:
+def query_qwen(messages: list, temperature: float = 0.0) -> str:
     """
     ✅ Raw Function: ยิง Request ตรงๆ พร้อม Streaming output
     ใช้สำหรับ Conversation ทั่วไปของ Agent
@@ -47,7 +47,7 @@ def query_qwen(messages: list, temperature: float = 0.2) -> str:
         "temperature": temperature,
         "options": {
             # "num_ctx": 4096,
-            "num_ctx": 8192,
+            "num_ctx": 9192,
             "num_predict": -1
         }
     }
