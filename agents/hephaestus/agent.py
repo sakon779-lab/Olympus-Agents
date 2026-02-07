@@ -278,6 +278,10 @@ When writing `docs/specs.md`, you MUST include:
 - **Edit Failed (Not Found)?** -> CHECK if you are trying to ADD new code. If yes, STOP using edit_file. Use `append_file` immediately instead.
 - **If you think 'Spec file created' but you haven't called write_file in this turn, YOU ARE HALLUCINATING. Call write_file now.**
 
+*** 🧪 TEST VALIDATION RULE ***
+- If a test fails but your code matches the `specs.md` logic, **RE-READ the test math**.
+- Don't just keep editing the code; check if the expected values in your test are mathematically correct based on the scoring rules.
+
 *** 🛡️ FILE OPERATIONS & EDITING PROTOCOL (STRICT) ***
 
 1. 🧠 **STEP 1: CHOOSE THE RIGHT TOOL (DECISION TREE)**
@@ -300,7 +304,8 @@ When writing `docs/specs.md`, you MUST include:
    - 🛑 **Failure Handling**: If `edit_file` returns "not found", **DO NOT RETRY the exact same text**. Switch to `read_file` again or use a smaller anchor text.
 
 4. 📝 **STEP 4: FORMATTING RULES (LAST_CODE_BLOCK)**
-   
+   - **🔄 ONE BLOCK PER ACTION**: Every time you call `write_file` or `append_file` for a DIFFERENT file, you MUST provide a NEW Markdown code block. 
+   - 🚫 **NEVER** assume the system remembers code from a previous file operation.
    **A. SYNTAX (THE CAGE)** 🧱
    - You MUST wrap your code/content in **TRIPLE BACKTICKS** (```).
    - ❌ WRONG: python def func(): ...
@@ -322,18 +327,45 @@ When writing `docs/specs.md`, you MUST include:
      2. JSON: `"content": "LAST_CODE_BLOCK"`.
    - **For `edit_file`**:
      1. Write the **REPLACEMENT CODE** inside a Markdown block (```python ... ```).
-     2. JSON: `target_text`: "exact code line (keep it short)", `replacement_text`: "LAST_CODE_BLOCK".
-     3. 🚫 **NEVER** put multi-line code inside the JSON string directly. It causes syntax errors. ALWAYS use the markdown block method.
+     2. JSON: 
+        - target_text: "The EXACT block or function you want to REMOVE (Include everything from header to the last line of that logic)".
+        - replacement_text: "LAST_CODE_BLOCK".
+     3. ⚠️ DELETION BOUNDARY: Your target_text must be unique and large enough to ensure the old code is completely deleted when the new code is inserted.
+     4. 🚫 **NEVER** put multi-line code inside the JSON string directly. It causes syntax errors. ALWAYS use the markdown block method.
 
 5. ⚠️ **FILENAME CONSTRAINTS**: 
    - Spec file must be `docs/specs.md`.
    - Python files must be in `src/` or `tests/`.
+   
 *** 💻 CROSS-PLATFORM SHELL RULES ***
 - **WINDOWS COMPATIBILITY:** When running shell commands via `run_command`:
   1. ALWAYS use **DOUBLE QUOTES** (`"`) for strings with spaces.
   2. NEVER use Single Quotes (`'`) for arguments.
   3. ❌ Wrong: `git commit -m 'My message'`
   4. ✅ Right: `git commit -m "My message"`
+  
+*** 🐙 GITHUB & PR PROTOCOL ***
+1. 🛑 **IF PR EXISTS**: If the system says "a pull request ... already exists", consider the PR creation successful. DO NOT try to create it again using other tools or `curl`. Move to `task_complete`.
+2. 🚫 **NO PLACEHOLDERS**: Never use dummy strings like "YOUR_GITHUB_TOKEN", "YOUR_USERNAME", or "<token>". Assume the environment is already authenticated. If a tool fails, report the error instead of hallucinating credentials.
+3. 🔄 **PUSH BEFORE PR**: Always ensure `git_push` is successful before calling `create_pr`.
+
+*** ⚔️ GIT CONFLICT & CODE INTEGRITY PROTOCOL ***
+1. 🚩 **CONFLICT DETECTION**: If a `git_pull` or `git_merge` fails with a CONFLICT, you MUST immediately:
+   - `read_file` every conflicting file.
+   - Look for Git markers: `<<<<<<<`, `=======`, `>>>>>>>`.
+   - 🚫 **STRICT RULE**: NEVER `git add` or `git commit` a file containing these markers.
+2. 🧹 **MANUAL RESOLUTION**: You must use `write_file` to overwrite the file with the CORRECT merged logic.
+3. 🔍 **INTEGRITY CHECK**: Before overwriting or appending, you MUST ensure you are not deleting existing functions (like `hello` or `reverse`) unless the task specifically asks for it.
+
+*** 🧹 CODE ARCHITECTURE RULE ***
+- If a file is small (<100 lines), prefer using `write_file` to rewrite the ENTIRE file with proper imports at the top and functions organized logically. Avoid over-using `append_file` which can lead to messy "layered" files.
+
+*** 🛠️ ADVANCED DEBUGGING & API RULES ***
+1. 📦 **JSON POST RULE**: When creating a POST endpoint that receives JSON, you MUST use a Pydantic `BaseModel`. Never use raw string arguments for JSON bodies in FastAPI.
+2. 🔄 **LOOP DETECTION**: If you have edited a file and the test STILL fails with the same error, DO NOT apply the same edit again. Re-read the error message and look for:
+   - Status code mismatches (e.g., 422 Unprocessable Entity often means a schema mismatch).
+   - Data type errors.
+3. 🧪 **TEST ALIGNMENT**: Ensure your test data (JSON) matches the schema you implemented in `src/main.py`.
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
@@ -386,7 +418,7 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task: str, max_steps: int = 30):
+def run_hephaestus_task(task: str, max_steps: int = 35):
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         settings.CURRENT_AGENT_NAME = "Hephaestus"
 
@@ -397,6 +429,9 @@ def run_hephaestus_task(task: str, max_steps: int = 30):
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": task}
     ]
+
+    last_code_block = None
+    persistent_code_block = None  # ต้องอยู่เหนือ while step_count < max_steps:
 
     for step in range(max_steps):
         print(f"\n🔄 Thinking (Step {step + 1})...")
@@ -418,16 +453,23 @@ def run_hephaestus_task(task: str, max_steps: int = 30):
         # ดึง Code Block ทั้งหมด
         all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
 
-        last_code_block = ""
         # วนลูปหา Block สุดท้าย ที่ "ไม่ใช่" JSON Action ของเรา
+        found_new_code = False  # รีเซ็ตธงทุกรอบ
         for block in reversed(all_blocks):
-            # ถ้าใน Block มีคำว่า "action": หรือ "write_file" แปลว่าเป็น Command ของ Agent เอง ไม่ใช่ Code
-            if '"action":' in block or '"write_file"' in block:
-                continue
-            # ถ้าไม่ใช่ JSON Command ให้ถือว่าเป็น Code ที่จะเอาไปใช้งาน
-            last_code_block = block
+            if '"action":' in block: continue
+            persistent_code_block = block  # จำลงความจำถาวร
+            found_new_code = True  # ปักธงว่ารอบนี้มีของใหม่
+            print(f"📦 Captured NEW code block ({len(block)} chars)")
             break
         # =========================================================
+
+        if found_new_code:
+            print(f"✨ NEW memory captured: {len(persistent_code_block)} characters.")
+        else:
+            if persistent_code_block:
+                print("♻️  No new code found, using existing memory.")
+            else:
+                print("⚠️  No code in memory yet.")
 
         # ✅ [แก้ตรงนี้] เรียกใช้ฟังก์ชันล้างข้อมูลก่อนส่งไปแกะ JSON
         content = sanitize_json_input(content)
@@ -621,26 +663,30 @@ def run_hephaestus_task(task: str, max_steps: int = 30):
                     args["replacement_text"] = current_replacement.strip()
                     # print("🧹 Auto-cleaned Markdown from edit_file replacement text.")
             elif action in ["write_file", "append_file"]:
-                # เงื่อนไข: ถ้า content ว่าง, หรือสั้นผิดปกติ, หรือ AI บอกให้ใช้ Block ล่าสุด
+                # เงื่อนไข: ถ้า AI สั่งให้ใช้ Block ล่าสุด หรือส่งมาสั้นผิดปกติ
                 current_content = args.get("content", "")
                 if not current_content or len(current_content) < 10 or current_content == "LAST_CODE_BLOCK":
-                    if last_code_block:
-                        # ✅ กรณีปกติ: เจอโค้ด
-                        args["content"] = last_code_block
-                        print(f"📝 Auto-attached content from Markdown block to {args.get('file_path')}")
+
+                    # ✅ เปลี่ยนจาก last_code_block เป็น persistent_code_block
+                    if persistent_code_block:
+                        args["content"] = persistent_code_block
+
+                        # แสดง Log ให้เราเห็นว่าดึงมาจากรอบไหน
+                        origin = "Current Step" if found_new_code else "Previous Step"
+                        print(f"📝 Auto-attached content from {origin} to {args.get('file_path')}")
+
                     else:
-                        # ❌ กรณีผิดพลาด: AI ลืมใส่ Backticks (เพิ่มตรงนี้!)
-                        print("🚫 ERROR: Agent used 'LAST_CODE_BLOCK' but no Markdown block was found.")
+                        # ❌ กรณีที่ทั้งรอบนี้และรอบก่อนๆ ไม่มี Code Block เลย
+                        print("🚫 ERROR: No Markdown block found in memory.")
                         error_msg = (
-                            "❌ SYNTAX ERROR: I cannot find the code block!\n"
-                            "⚠️ You used 'LAST_CODE_BLOCK', but you forgot to wrap your code in triple backticks (```python ... ```).\n"
-                            "👉 Please rewrite the code using standard Markdown code blocks."
+                            "❌ SYNTAX ERROR: I cannot find any code block to write!\n"
+                            "⚠️ You used 'LAST_CODE_BLOCK', but no Markdown code block was found in your current or previous responses.\n"
+                            "👉 Please provide the code wrapped in triple backticks (```python ... ```) before calling this tool."
                         )
-                        # ส่ง Error กลับไปหา AI เพื่อให้มันแก้ตัวใหม่ในรอบหน้า
                         step_outputs.append(error_msg)
                         history.append({"role": "assistant", "content": content})
                         history.append({"role": "user", "content": error_msg})
-                        continue  # 🛑 หยุดทันที ไม่ให้ไปถึง Safety Lock
+                        continue
 
                 # =========================================================
                 # 🛡️ 2. MARKDOWN STRIPPER (เพิ่มใหม่ตรงนี้!)
@@ -743,7 +789,16 @@ def run_hephaestus_task(task: str, max_steps: int = 30):
             # =========================================================
 
             print(f"🔧 Executing: {action}")
+            # 1. รันเครื่องมือตามปกติ
             result = execute_tool_dynamic(action, args)
+
+            # 2. ตรวจสอบผลลัพธ์: ถ้าเป็นการ "แก้ไขไฟล์" และ "สำเร็จ"
+            file_modifying_actions = ["write_file", "append_file", "edit_file"]
+
+            if action in file_modifying_actions and "✅" in result:
+                # 🧹 ล้างความจำทันทีเพื่อให้สเต็ปถัดไป "สะอาด"
+                persistent_code_block = None
+                print(f"🧹 Memory flushed after successful {action}. Ready for new code.")
 
             # =========================================================
             # 🟢 [NEW] BATCHING DETECTOR (แจ้งเตือน AI ถ้ามันเผลอรัวคำสั่ง)

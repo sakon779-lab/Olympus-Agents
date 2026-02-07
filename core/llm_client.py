@@ -47,7 +47,7 @@ def query_qwen(messages: list, temperature: float = 0.0) -> str:
         "temperature": temperature,
         "options": {
             # "num_ctx": 4096,
-            "num_ctx": 15000,
+            "num_ctx": 16000,
             "num_predict": -1
         }
     }
