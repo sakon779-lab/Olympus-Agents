@@ -23,6 +23,33 @@ from core.tools.git_ops import run_git_cmd  # ใช้สำหรับ valida
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
 logger = logging.getLogger("Hephaestus")
 
+def sanitize_json_input(raw_text):
+    """
+    Professional Fix: ทำความสะอาด JSON string ที่ Model อาจจะเขียนผิดมา
+    โดยเฉพาะกรณีใช้ Triple Quotes  แทนที่จะใช้ \n
+    """
+    # 1. ลบ Markdown Code Blocks (```json ... ```) ถ้ามี
+    clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
+
+    # 2. แก้ปัญหา Triple Quotes  ที่
+    # Logic: หา string ที่อยู่ระหว่าง """ ... """ แล้วแปลง newlines เป็น \n ให้หมด
+
+    def fix_triple_quotes(match):
+        content = match.group(1)
+        # Escape backslashes first
+        content = content.replace('\\', '\\\\')
+        # Escape double quotes
+        content = content.replace('"', '\\"')
+        # Replace newlines with \n
+        content = content.replace('\n', '\\n')
+        return f'"{content}"'
+
+    # Regex ค้นหา """...""" (แบบ non-greedy)
+    clean_text = re.sub(r'"""(.*?)"""', fix_triple_quotes, clean_text, flags=re.DOTALL)
+
+    return clean_text.strip()
 
 # ==============================================================================
 # 🛠️ HEPHAESTUS SPECIFIC TOOLS (Sandbox Commanders)
@@ -136,8 +163,22 @@ SYSTEM_PROMPT = """
 You are "Hephaestus", the Senior Python Developer of Olympus.
 Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), CONTAINERIZE (Compose), and Submit a PR.
 
-*** 👑 CORE PHILOSOPHY & METHODOLOGY ***
+*** 🧠 LOGIC & REQUIREMENTS RULES ***
+1. **JIRA IS GOD**: The requirements in the Jira Ticket are the ONLY truth.
+2. **IGNORE LEGACY**: Existing code in `src/` is "Legacy Code". It is NOT the feature you are building.
+3. **NO ASSUMPTIONS**: Even if tests pass, you MUST verify: "Did I actually implement the SPECIFIC feature requested in Jira?"
+   - If Jira says "Password Checker", but you see "Hello World" code -> YOU MUST WRITE THE PASSWORD CHECKER.
+   - Do NOT assume the task is already done.
 
+*** 📝 SPECIFICATION STANDARDS ***
+When writing `docs/specs.md`, you MUST include:
+1. **API Endpoint & Method**
+2. **Request Body Schema** (JSON Example)
+3. **Response Body Schema** (JSON Example for Success & Error cases)
+   - ⚠️ IMPORTANT: Explicitly list ALL fields (e.g., score, feedback, strength).
+4. **Business Logic & Rules**
+
+*** 👑 CORE PHILOSOPHY & METHODOLOGY ***
 **A. THE SOURCE OF TRUTH (SDD)**
 - **JIRA** is the absolute source of truth.
 - You must create a local **SPEC FILE** (`docs/specs.md`) before writing any code.
@@ -234,25 +275,65 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 - **Tests Failed?** -> Read the error. Fix the code. Retry.
 - **Git Nothing to commit?** -> You might have missed implementing the file or the file matches exactly. Review your changes.
 - **JSON Error?** -> Remember to escape quotes (`\"`) and newlines (`\\n`).
-- **Edit Failed (Not Found)?** -> You probably mistyped the `target_text`. Read the file again and copy-paste exactly.
+- **Edit Failed (Not Found)?** -> CHECK if you are trying to ADD new code. If yes, STOP using edit_file. Use `append_file` immediately instead.
 - **If you think 'Spec file created' but you haven't called write_file in this turn, YOU ARE HALLUCINATING. Call write_file now.**
 
-*** FILE WRITING & EDITING RULES (STRICT) ***
+*** 🛡️ FILE OPERATIONS & EDITING PROTOCOL (STRICT) ***
 
-1. 📝 **WRITE/APPEND (New Files/Adding Endpoints)**:
-   - **Step 1:** Write the full content inside a Markdown code block (```python ... ```).
-   - **Step 2:** Call the tool with `"content": "LAST_CODE_BLOCK"`.
-   - 🚫 **NEVER** put long code inside the JSON string.
+1. 🧠 **STEP 1: CHOOSE THE RIGHT TOOL (DECISION TREE)**
+   - **Scenario A: New Feature / New File**
+     👉 Use `write_file`.
+   - **Scenario B: Adding code to the END of a file** (e.g., new endpoints, new classes).
+     👉 Use `append_file`. (SAFEST method, prevents overwriting).
+   - **Scenario C: Modifying INSIDE a function/class** or fixing a bug.
+     👉 Use `edit_file`.
 
-2. ✂️ **EDIT (Modifying Existing Code)**:
-   - **Step 1:** Write the NEW code (Replacement) inside a Markdown code block.
-   - **Step 2:** Call `edit_file` with:
-     - `target_text`: Put the exact existing string here (inside JSON). Keep it short (unique anchor) to avoid escaping issues.
-     - `replacement_text`: "LAST_CODE_BLOCK".
+2. 🚫 **STEP 2: SAFETY CHECKS (BEFORE ACTION)**
+   - **Anti-Overwrite**: NEVER use `write_file` on an existing Source Code file (`src/*.py`) unless rewriting 100% from scratch.
+   - **Anti-Hallucination**: Before using `edit_file`, you MUST `read_file` first. The `target_text` MUST exist EXACTLY in the file.
+   - **No Magic Comments**: Do NOT target comments like `# Add code here` unless you actually saw them in `read_file`.
 
-3. ⚠️ **FILENAME RULE**: 
+3. 🎯 **STEP 3: PRECISION EDITING (AVOID INDENTATION ERRORS)**
+   - **Rule**: Python indentation is tricky. Multi-line `target_text` often fails to match due to invisible spaces/tabs.
+   - 🤏 **Best Practice**: Target a **SINGLE unique line** (e.g., `def my_function():`) instead of a whole code block.
+   - 🔄 **Replacement Strategy**: In `replacement_text`, provide the **ENTIRE new function/block** (including the definition line). This forces the correct indentation in the new block.
+   - 🛑 **Failure Handling**: If `edit_file` returns "not found", **DO NOT RETRY the exact same text**. Switch to `read_file` again or use a smaller anchor text.
+
+4. 📝 **STEP 4: FORMATTING RULES (LAST_CODE_BLOCK)**
+   
+   **A. SYNTAX (THE CAGE)** 🧱
+   - You MUST wrap your code/content in **TRIPLE BACKTICKS** (```).
+   - ❌ WRONG: python def func(): ...
+   - ✅ RIGHT: 
+     ```python
+     def func(): ...
+     ```
+   - If you don't use backticks, the system sees NOTHING.
+
+   **B. LOGIC (THE PLACEHOLDER)** 🧠
+   - `LAST_CODE_BLOCK` is a MAGIC PLACEHOLDER.
+   - When you use it, the System **INSTANTLY** replaces it with the actual code from your Markdown block.
+   - **CONSEQUENCE**: The file on disk contains the **Python Code**, NOT the string "LAST_CODE_BLOCK".
+   - 🚫 **NEVER** try to `edit_file` with `target_text: "LAST_CODE_BLOCK"`. IT DOES NOT EXIST. Target the actual function/code instead.
+
+   **C. PROTOCOL** 📋
+   - **For `write_file` / `append_file`**:
+     1. Write content in ```python ... ```.
+     2. JSON: `"content": "LAST_CODE_BLOCK"`.
+   - **For `edit_file`**:
+     1. Write the **REPLACEMENT CODE** inside a Markdown block (```python ... ```).
+     2. JSON: `target_text`: "exact code line (keep it short)", `replacement_text`: "LAST_CODE_BLOCK".
+     3. 🚫 **NEVER** put multi-line code inside the JSON string directly. It causes syntax errors. ALWAYS use the markdown block method.
+
+5. ⚠️ **FILENAME CONSTRAINTS**: 
    - Spec file must be `docs/specs.md`.
    - Python files must be in `src/` or `tests/`.
+*** 💻 CROSS-PLATFORM SHELL RULES ***
+- **WINDOWS COMPATIBILITY:** When running shell commands via `run_command`:
+  1. ALWAYS use **DOUBLE QUOTES** (`"`) for strings with spaces.
+  2. NEVER use Single Quotes (`'`) for arguments.
+  3. ❌ Wrong: `git commit -m 'My message'`
+  4. ✅ Right: `git commit -m "My message"`
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
@@ -305,7 +386,7 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task: str, max_steps: int = 50):
+def run_hephaestus_task(task: str, max_steps: int = 30):
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         settings.CURRENT_AGENT_NAME = "Hephaestus"
 
@@ -347,6 +428,9 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
             last_code_block = block
             break
         # =========================================================
+
+        # ✅ [แก้ตรงนี้] เรียกใช้ฟังก์ชันล้างข้อมูลก่อนส่งไปแกะ JSON
+        content = sanitize_json_input(content)
 
         tool_calls = _extract_all_jsons(content)
 
@@ -524,15 +608,52 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                         print(f"✏️ Auto-attached replacement text from Markdown block.")
                     else:
                         print("⚠️ Warning: edit_file called but no code block found.")
+
+                # =========================================================
+                # 🛡️ 2. เพิ่ม MARKDOWN STRIPPER ให้ edit_file ด้วย! (สำคัญมาก)
+                # =========================================================
+                current_replacement = args.get("replacement_text", "")
+                if "```" in current_replacement:
+                    # ลบบรรทัดแรกที่เป็น ```python
+                    current_replacement = re.sub(r"^```[a-zA-Z0-9]*\n", "", current_replacement)
+                    # ลบบรรทัดสุดท้ายที่เป็น ```
+                    current_replacement = re.sub(r"\n```$", "", current_replacement)
+                    args["replacement_text"] = current_replacement.strip()
+                    # print("🧹 Auto-cleaned Markdown from edit_file replacement text.")
             elif action in ["write_file", "append_file"]:
                 # เงื่อนไข: ถ้า content ว่าง, หรือสั้นผิดปกติ, หรือ AI บอกให้ใช้ Block ล่าสุด
                 current_content = args.get("content", "")
                 if not current_content or len(current_content) < 10 or current_content == "LAST_CODE_BLOCK":
                     if last_code_block:
+                        # ✅ กรณีปกติ: เจอโค้ด
                         args["content"] = last_code_block
                         print(f"📝 Auto-attached content from Markdown block to {args.get('file_path')}")
                     else:
-                        print("⚠️ Warning: write_file called but no code block found.")
+                        # ❌ กรณีผิดพลาด: AI ลืมใส่ Backticks (เพิ่มตรงนี้!)
+                        print("🚫 ERROR: Agent used 'LAST_CODE_BLOCK' but no Markdown block was found.")
+                        error_msg = (
+                            "❌ SYNTAX ERROR: I cannot find the code block!\n"
+                            "⚠️ You used 'LAST_CODE_BLOCK', but you forgot to wrap your code in triple backticks (```python ... ```).\n"
+                            "👉 Please rewrite the code using standard Markdown code blocks."
+                        )
+                        # ส่ง Error กลับไปหา AI เพื่อให้มันแก้ตัวใหม่ในรอบหน้า
+                        step_outputs.append(error_msg)
+                        history.append({"role": "assistant", "content": content})
+                        history.append({"role": "user", "content": error_msg})
+                        continue  # 🛑 หยุดทันที ไม่ให้ไปถึง Safety Lock
+
+                # =========================================================
+                # 🛡️ 2. MARKDOWN STRIPPER (เพิ่มใหม่ตรงนี้!)
+                # =========================================================
+                # ถ้าเนื้อหามี ``` ครอบอยู่ ให้แกะออก
+                if "```" in current_content:
+                    # ลบบรรทัดแรกที่เป็น ```yaml, ```python, etc.
+                    current_content = re.sub(r"^```[a-zA-Z0-9]*\n", "", current_content)
+                    # ลบบรรทัดสุดท้ายที่เป็น ```
+                    current_content = re.sub(r"\n```$", "", current_content)
+                    # อัปเดตกลับเข้าไปใน args
+                    args["content"] = current_content.strip()  # strip() เพื่อลบช่องว่างหัวท้าย
+                    # print("🧹 Auto-cleaned Markdown artifacts from file content.")
             # =========================================================
 
             # =========================================================
@@ -580,6 +701,44 @@ def run_hephaestus_task(task: str, max_steps: int = 50):
                         history.append({"role": "assistant", "content": content})
                         history.append({"role": "user", "content": error_msg})
                         continue  # 🚀 ข้ามการทำงานรอบนี้ไปเลย (ไม่รัน execute_tool_dynamic)
+
+            # =========================================================
+
+            # =========================================================
+            # 🛡️ 3️⃣ SAFETY LOCK (ป้องกันการเขียนทับไฟล์มั่วซั่ว) <-- เพิ่มตรงนี้
+            # =========================================================
+            if action == "write_file":
+                target_path = args.get("file_path", "")
+                full_path = os.path.join(settings.AGENT_WORKSPACE, target_path)  # ต้องใช้ path เต็มเพื่อเช็คไฟล์จริง
+
+                # เงื่อนไข: ถ้าไฟล์มีอยู่แล้ว และเป็นไฟล์ Python (.py) (ไม่นับพวก config/md)
+                if os.path.exists(full_path) and target_path.endswith(".py"):
+                    try:
+                        # อ่านไฟล์เดิมมาเช็คความยาว
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            old_content = f.read()
+
+                        new_content = args.get("content", "")
+
+                        # 🚨 กฎเหล็ก: ถ้าของใหม่สั้นกว่าของเก่าเกิน 50% แสดงว่า AI กำลังจะลบโค้ดทิ้ง!
+                        if len(new_content) < len(old_content) * 0.5:
+                            print(f"🚫 BLOCKED: Prevented accidental overwrite of {target_path}")
+                            error_msg = (
+                                f"🚫 SAFETY BLOCK: You are trying to overwrite '{target_path}' with content significantly shorter than the original.\n"
+                                f"⚠️ DANGER: Using `write_file` will DELETE the existing code! (Old: {len(old_content)} chars -> New: {len(new_content)} chars)\n"
+                                f"👉 ACTION: \n"
+                                f"   1. Use `append_file` to add new endpoints/classes at the bottom.\n"
+                                f"   2. Use `edit_file` to modify specific parts.\n"
+                                f"   3. If you really mean to rewrite, verify the content matches the full file logic."
+                            )
+
+                            # บันทึก Error และเด้งกลับ
+                            step_outputs.append(error_msg)
+                            history.append({"role": "assistant", "content": content})
+                            history.append({"role": "user", "content": error_msg})
+                            continue  # 🛑 หยุดทันที รักษาชีวิตโค้ดเก่าไว้
+                    except Exception as e:
+                        print(f"⚠️ Safety check warning: {e}")
 
             # =========================================================
 
