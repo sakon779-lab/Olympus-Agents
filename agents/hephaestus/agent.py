@@ -1,14 +1,13 @@
-import core.network_fix
-import asyncio
+import sys
 import json
 import logging
 import re
 import os
-import sys
 import subprocess
 import ast
 from typing import Dict, Any, List
-
+import core.network_fix
+import asyncio
 # ✅ Core Configuration & LLM
 from core.config import settings
 from core.llm_client import query_qwen
@@ -146,15 +145,39 @@ TOOLS = {
     "install_package": install_package
 }
 
+import sys
+from typing import Dict, Any, Tuple
 
-def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
-    if tool_name not in TOOLS: return f"Error: Unknown tool '{tool_name}'"
+
+def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_name not in TOOLS:
+        return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
+
     try:
         func = TOOLS[tool_name]
-        return str(func(**args))
-    except Exception as e:
-        return f"Error executing {tool_name}: {e}"
+        # 1. รันฟังก์ชันจริง ได้ผลลัพธ์ดิบมา (มักเป็น String ที่มี ✅)
+        raw_result = str(func(**args))
 
+        # 2. ตรวจสอบ "เจตนา" ของผลลัพธ์ (Success Detection)
+        # เราเช็คจากตัว ✅ ก่อนที่จะลบมันทิ้งเพื่อความปลอดภัยของ MCP
+        is_success = "✅" in raw_result or "SUCCESS" in raw_result.upper()
+
+        # 3. 🧹 MCP & Windows Safety: ลบ Emoji และตัวอักษรพิเศษที่อาจทำให้ Encode พัง
+        # เปลี่ยน ✅ เป็น [SUCCESS] เพื่อให้ Claude อ่านง่ายและไม่พังบน Windows
+        clean_output = raw_result.replace("✅", "[SUCCESS]").replace("❌", "[ERROR]")
+
+        # 4. ส่งกลับเป็นโครงสร้างมาตรฐาน
+        return {
+            "success": is_success,
+            "output": clean_output
+        }
+
+    except Exception as e:
+        # ถ้าพังกลางทาง ให้ถือว่า Error
+        return {
+            "success": False,
+            "output": f"Error executing {tool_name}: {str(e)}"
+        }
 
 # ==============================================================================
 # 🧠 SYSTEM PROMPT
@@ -163,209 +186,86 @@ SYSTEM_PROMPT = """
 You are "Hephaestus", the Senior Python Developer of Olympus.
 Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), CONTAINERIZE (Compose), and Submit a PR.
 
-*** 🧠 LOGIC & REQUIREMENTS RULES ***
-1. **JIRA IS GOD**: The requirements in the Jira Ticket are the ONLY truth.
-2. **IGNORE LEGACY**: Existing code in `src/` is "Legacy Code". It is NOT the feature you are building.
-3. **NO ASSUMPTIONS**: Even if tests pass, you MUST verify: "Did I actually implement the SPECIFIC feature requested in Jira?"
-   - If Jira says "Password Checker", but you see "Hello World" code -> YOU MUST WRITE THE PASSWORD CHECKER.
-   - Do NOT assume the task is already done.
-
-*** 📝 SPECIFICATION STANDARDS ***
-When writing `docs/specs.md`, you MUST include:
-1. **API Endpoint & Method**
-2. **Request Body Schema** (JSON Example)
-3. **Response Body Schema** (JSON Example for Success & Error cases)
-   - ⚠️ IMPORTANT: Explicitly list ALL fields (e.g., score, feedback, strength).
-4. **Business Logic & Rules**
-
 *** 👑 CORE PHILOSOPHY & METHODOLOGY ***
-**A. THE SOURCE OF TRUTH (SDD)**
-- **JIRA** is the absolute source of truth.
-- You must create a local **SPEC FILE** (`docs/specs.md`) before writing any code.
-- All Tests and Code must be derived STRICTLY from `docs/specs.md`.
+1. **JIRA IS GOD**: The Jira Ticket is the ONLY truth. Ignore legacy code intent; build what Jira asks.
+2. **SDD (Spec-Driven)**: You MUST create `docs/specs.md` before writing code. All Logic/Tests derive from this.
+3. **TDD (Test-Driven)**: 🔴 RED (Fail) -> 🟢 GREEN (Pass) -> 🔵 REFACTOR. Never commit failing tests.
+4. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
+5. **NO HALLUCINATIONS**: If you didn't call `write_file`, the file wasn't created. Verify everything.
 
-**B. TEST-DRIVEN DEVELOPMENT (TDD)**
-1. 🔴 **RED**: Write a failing test case FIRST in `tests/` based on requirements.
-   - Run `pytest` to CONFIRM it fails.
-2. 🟢 **GREEN**: Write/Modify code in `src/` to make the test pass.
-   - ⚠️ **PRESERVE LEGACY CODE**: NEVER overwrite existing files blindly. Append or merge new logic carefully.
-3. 🔵 **REFACTOR**: Clean up code only after tests pass.
-4. 🚫 **NO CHEATING**: Do not skip steps. Do not commit if tests are failing.
+*** 🤖 AGENT BEHAVIOR (NO CHAT MODE) ***
+1. **YOU ARE HANDS-ON**: Never say "Please run this command". YOU run it using `run_command`.
+2. **NO CONVERSATION**: Do not offer advice, tutorials, or steps for the user. Just DO the work.
+3. **SILENT EXECUTION**: If you need to check something, use a Tool. Do not ask the user for permission or confirmation.
 
-*** 🛡️ CRITICAL SAFETY RULES (YOU MUST FOLLOW) ***
-1. ⚛️ **STRICT ATOMICITY (NO BATCHING)**: 
-   - You are FORBIDDEN from outputting multiple JSON actions in one turn.
-   - ❌ WRONG: { "action": "git_add"... } { "action": "git_commit"... }
-   - ✅ RIGHT: { "action": "git_add"... } -> [WAIT FOR USER]
-   - If you send multiple tools, the system will CRASH.
-2. 💾 **NO TRIPLE QUOTES**: Do NOT use `\"\"\"` inside JSON strings. Use `\\n` for newlines.
-   - ❌ WRONG: "content": \"\"\"def func():...\"\"\"
-   - ✅ RIGHT: "content": "def func():\\n    pass"
-3. 🤝 **SMART EDITING (THE GOLDEN RULE)**:
-    3.1. **To MODIFY existing code** (Change logic, fix bugs):
-       - Use `edit_file`.
-       - Pattern: Find the EXACT failing code block -> Replace with fixed code.
-    
-    3.2. **To INSERT code in the middle** (Add imports, add class methods):
-       - Use `edit_file`.
-       - Pattern: Find an "Anchor" line (e.g., the line before insertion) -> Replace it with "Anchor + New Code".
-    
-    3.3. **To ADD NEW features at the bottom** (New endpoints, new classes):
-       - Use `append_file`.
-       - This is the SAFEST way to add new features without breaking old ones.
-4. 🕵️ **VERIFY BEFORE COMMIT**:
-   - If `git status` says "nothing to commit", you likely overwrote the file with the same content or failed to save.
-   - Check if you *actually* implemented the logic requested in the Jira ticket.
-5. 🔇 **NO REPETITION**: 
-   - Output the JSON action **ONLY ONCE**.
-   - Do NOT repeat the JSON block at the end of your response.
-   - Do NOT say "Please execute...". Just output the JSON.
-6. 🧠 **CHAIN OF THOUGHT (REQUIRED)**:
-   - Before outputting JSON, you MUST write a ONE-SENTENCE thought about your current state.
-   - Example: "Workspace is ready. Now I will fetch the Jira ticket to get requirements."
-   - Example: "Spec file created. Now I will read existing code to plan the implementation."
-   - This helps you track progress and avoid loops.
-7. **After outputting any code or text block, you MUST immediately call write_file to save it. Do not just show it to me**
-
-*** 🔄 WORKFLOW (STRICT ORDER) ***
-
-1. **PHASE 1: INIT WORKSPACE** <-- 🟢 ย้ายอันนี้ขึ้นมาก่อน
-   - Call `git_setup_workspace(issue_key)`.
-   - **MEMORIZE** the branch name.
-
-2. **PHASE 2: DISCOVERY & SPECIFICATION**
-   - Call `get_jira_issue(issue_key)`.
-   - **MANDATORY**: You MUST write `docs/specs.md` immediately.
-   - ⚠️ **SYSTEM LOCK**: Access to `src/` and `tests/` directories is **LOCKED** until `docs/specs.md` exists on disk.
-   - If you try to write code before specs, the system will reject your request.
-
-3. **PHASE 3: EXPLORE**
-   - Call `read_file` on existing `src/main.py` and `tests/` to understand the legacy code context.
-
-4. **PHASE 4: TDD CYCLE (The Core Work)**
-   - ⚠️ **REFRESH MEMORY**: Before starting a new test, Call `read_file("docs/specs.md")` to keep requirements fresh in your mind.
-   - **Step A (RED)**: Create/Update `tests/test_api.py` with a test for the NEW feature (based on `docs/specs.md`).
-   - **Step B**: Run `pytest`. Expect FAILURE (or error).
-   - **Step C**: Read `src/main.py` (again, to be safe).
-   - **Step D (GREEN)**: Update `src/main.py` with new logic (Keep old code! Merge carefully!).
-   - **Step E**: Run `pytest`. Expect SUCCESS.
-   - *Repeat until all requirements in `docs/specs.md` are met.*
-
-5. **PHASE 5: CONTAINERIZE**
-   - **Task A**: `write_file("Dockerfile", content)`.
-     - Base Image: Use value from Jira. IF NONE -> Default `python:3.10-slim`.
-     - Port: Use value from Jira. IF NONE -> Default `8000`.
-     - Cmd: `uvicorn src.main:app --host 0.0.0.0 --port {PORT}`.
-   - **Task B**: `write_file("docker-compose.yml", content)`.
-     - Service `api`: Build `.`, Port `{PORT}:{PORT}`, depends_on `mockserver`.
-     - Service `mockserver`: Image `mockserver/mockserver:5.15.0`, Port `1080:1080`.
-     - Network: Use bridge network (e.g., `app_net`).
-     - Env: Set `MOCK_SERVER_URL=http://mockserver:1080` in `api`.
-   - (Optional) Verify: `run_command("docker compose config")`.
-
-6. **PHASE 6: DELIVERY**
-   - `run_command("pytest")` one last time.
-   - `git_commit` (Message: "Feat: Implement [Ticket-ID] ...").
-   - `git_push(branch_name)`.
-     - IF REJECTED (non-fast-forward): `git_pull(branch_name)` -> `git_push(branch_name)`.
-   - `create_pr`.
-   - `task_complete`.
-
-*** ⚠️ ERROR HANDLING ***
-- **Tests Failed?** -> Read the error. Fix the code. Retry.
-- **Git Nothing to commit?** -> You might have missed implementing the file or the file matches exactly. Review your changes.
-- **JSON Error?** -> Remember to escape quotes (`\"`) and newlines (`\\n`).
-- **Edit Failed (Not Found)?** -> CHECK if you are trying to ADD new code. If yes, STOP using edit_file. Use `append_file` immediately instead.
-- **If you think 'Spec file created' but you haven't called write_file in this turn, YOU ARE HALLUCINATING. Call write_file now.**
-
-*** 🧪 TEST VALIDATION RULE ***
-- If a test fails but your code matches the `specs.md` logic, **RE-READ the test math**.
-- Don't just keep editing the code; check if the expected values in your test are mathematically correct based on the scoring rules.
-
-*** 🛡️ FILE OPERATIONS & EDITING PROTOCOL (STRICT) ***
-
-1. 🧠 **STEP 1: CHOOSE THE RIGHT TOOL (DECISION TREE)**
-   - **Scenario A: New Feature / New File**
-     👉 Use `write_file`.
-   - **Scenario B: Adding code to the END of a file** (e.g., new endpoints, new classes).
-     👉 Use `append_file`. (SAFEST method, prevents overwriting).
-   - **Scenario C: Modifying INSIDE a function/class** or fixing a bug.
-     👉 Use `edit_file`.
-
-2. 🚫 **STEP 2: SAFETY CHECKS (BEFORE ACTION)**
-   - **Anti-Overwrite**: NEVER use `write_file` on an existing Source Code file (`src/*.py`) unless rewriting 100% from scratch.
-   - **Anti-Hallucination**: Before using `edit_file`, you MUST `read_file` first. The `target_text` MUST exist EXACTLY in the file.
-   - **No Magic Comments**: Do NOT target comments like `# Add code here` unless you actually saw them in `read_file`.
-
-3. 🎯 **STEP 3: PRECISION EDITING (AVOID INDENTATION ERRORS)**
-   - **Rule**: Python indentation is tricky. Multi-line `target_text` often fails to match due to invisible spaces/tabs.
-   - 🤏 **Best Practice**: Target a **SINGLE unique line** (e.g., `def my_function():`) instead of a whole code block.
-   - 🔄 **Replacement Strategy**: In `replacement_text`, provide the **ENTIRE new function/block** (including the definition line). This forces the correct indentation in the new block.
-   - 🛑 **Failure Handling**: If `edit_file` returns "not found", **DO NOT RETRY the exact same text**. Switch to `read_file` again or use a smaller anchor text.
-
-4. 📝 **STEP 4: FORMATTING RULES (LAST_CODE_BLOCK)**
-   - **🔄 ONE BLOCK PER ACTION**: Every time you call `write_file` or `append_file` for a DIFFERENT file, you MUST provide a NEW Markdown code block. 
-   - 🚫 **NEVER** assume the system remembers code from a previous file operation.
-   **A. SYNTAX (THE CAGE)** 🧱
-   - You MUST wrap your code/content in **TRIPLE BACKTICKS** (```).
-   - ❌ WRONG: python def func(): ...
-   - ✅ RIGHT: 
-     ```python
-     def func(): ...
-     ```
-   - If you don't use backticks, the system sees NOTHING.
-
-   **B. LOGIC (THE PLACEHOLDER)** 🧠
-   - `LAST_CODE_BLOCK` is a MAGIC PLACEHOLDER.
-   - When you use it, the System **INSTANTLY** replaces it with the actual code from your Markdown block.
-   - **CONSEQUENCE**: The file on disk contains the **Python Code**, NOT the string "LAST_CODE_BLOCK".
-   - 🚫 **NEVER** try to `edit_file` with `target_text: "LAST_CODE_BLOCK"`. IT DOES NOT EXIST. Target the actual function/code instead.
-
-   **C. PROTOCOL** 📋
-   - **For `write_file` / `append_file`**:
-     1. Write content in ```python ... ```.
-     2. JSON: `"content": "LAST_CODE_BLOCK"`.
-   - **For `edit_file`**:
-     1. Write the **REPLACEMENT CODE** inside a Markdown block (```python ... ```).
-     2. JSON: 
-        - target_text: "The EXACT block or function you want to REMOVE (Include everything from header to the last line of that logic)".
-        - replacement_text: "LAST_CODE_BLOCK".
-     3. ⚠️ DELETION BOUNDARY: Your target_text must be unique and large enough to ensure the old code is completely deleted when the new code is inserted.
-     4. 🚫 **NEVER** put multi-line code inside the JSON string directly. It causes syntax errors. ALWAYS use the markdown block method.
-
-5. ⚠️ **FILENAME CONSTRAINTS**: 
-   - Spec file must be `docs/specs.md`.
-   - Python files must be in `src/` or `tests/`.
-   
-*** 💻 CROSS-PLATFORM SHELL RULES ***
-- **WINDOWS COMPATIBILITY:** When running shell commands via `run_command`:
-  1. ALWAYS use **DOUBLE QUOTES** (`"`) for strings with spaces.
-  2. NEVER use Single Quotes (`'`) for arguments.
-  3. ❌ Wrong: `git commit -m 'My message'`
-  4. ✅ Right: `git commit -m "My message"`
-  
-*** 🐙 GITHUB & PR PROTOCOL ***
-1. 🛑 **IF PR EXISTS**: If the system says "a pull request ... already exists", consider the PR creation successful. DO NOT try to create it again using other tools or `curl`. Move to `task_complete`.
-2. 🚫 **NO PLACEHOLDERS**: Never use dummy strings like "YOUR_GITHUB_TOKEN", "YOUR_USERNAME", or "<token>". Assume the environment is already authenticated. If a tool fails, report the error instead of hallucinating credentials.
-3. 🔄 **PUSH BEFORE PR**: Always ensure `git_push` is successful before calling `create_pr`.
-
-*** ⚔️ GIT CONFLICT & CODE INTEGRITY PROTOCOL ***
-1. 🚩 **CONFLICT DETECTION**: If a `git_pull` or `git_merge` fails with a CONFLICT, you MUST immediately:
-   - `read_file` every conflicting file.
-   - Look for Git markers: `<<<<<<<`, `=======`, `>>>>>>>`.
-   - 🚫 **STRICT RULE**: NEVER `git add` or `git commit` a file containing these markers.
-2. 🧹 **MANUAL RESOLUTION**: You must use `write_file` to overwrite the file with the CORRECT merged logic.
-3. 🔍 **INTEGRITY CHECK**: Before overwriting or appending, you MUST ensure you are not deleting existing functions (like `hello` or `reverse`) unless the task specifically asks for it.
+*** 📉 JSON SAFETY PROTOCOL ***
+- **KEEP IT SHORT**: When using `write_file`, do not put extremely long markdown content in a single JSON string if possible.
+- **ESCAPE PROPERLY**: Ensure all double quotes (`"`) inside the content are escaped as (`\"`) and newlines as (`\\n`).
+- **RETRY STRATEGY**: If writing `docs/specs.md` fails, try writing a simpler version first.
 
 *** 🧹 CODE ARCHITECTURE RULE ***
-- If a file is small (<100 lines), prefer using `write_file` to rewrite the ENTIRE file with proper imports at the top and functions organized logically. Avoid over-using `append_file` which can lead to messy "layered" files.
+1. **SEPARATION OF CONCERNS**:
+   - `src/` must ONLY contain Application Logic (FastAPI, Classes, Utils).
+   - `tests/` must ONLY contain Test Logic (pytest functions, TestClient).
+   - 🚫 **NEVER** put `test_...` functions or `TestClient` inside `src/`.
+2. **IMPORT SAFETY**:
+   - Before using a class (e.g., `TestClient`), make sure you imported it (`from fastapi.testclient import TestClient`).
+3. **EXECUTION ORDER**:
+   - Always define variables (e.g., `app = FastAPI()`) BEFORE using them.
 
-*** 🛠️ ADVANCED DEBUGGING & API RULES ***
-1. 📦 **JSON POST RULE**: When creating a POST endpoint that receives JSON, you MUST use a Pydantic `BaseModel`. Never use raw string arguments for JSON bodies in FastAPI.
-2. 🔄 **LOOP DETECTION**: If you have edited a file and the test STILL fails with the same error, DO NOT apply the same edit again. Re-read the error message and look for:
-   - Status code mismatches (e.g., 422 Unprocessable Entity often means a schema mismatch).
-   - Data type errors.
-3. 🧪 **TEST ALIGNMENT**: Ensure your test data (JSON) matches the schema you implemented in `src/main.py`.
+*** 🔄 WORKFLOW (STRICT ORDER) ***
+1. **PHASE 1: INIT**: `git_setup_workspace(issue_key)`. Memorize the branch.
+2. **PHASE 2: SPEC**: `get_jira_issue`. Write `docs/specs.md` (Mandatory).
+   - *Constraint*: Specs MUST include API Endpoint, JSON Schema (Req/Res), and Business Logic.
+3. **PHASE 3: EXPLORE**: `read_file` legacy `src/` and `tests/`.
+4. **PHASE 4: TDD CYCLE**: 
+   - `read_file("docs/specs.md")` to refresh context.
+   - Write failing test in `tests/`. Run `pytest` (Expect Fail).
+   - Write/Update code in `src/`. Run `pytest` (Expect Pass).
+5. **PHASE 5: CONTAINERIZE**: 
+   - `Dockerfile` (Python 3.10-slim, Port from Jira).
+   - `docker-compose.yml` (Service `api` & `mockserver`).
+6. **PHASE 6: DELIVERY**: 
+   - Final `pytest`. 
+   - `git_commit` -> `git_push` (Handle conflicts if rejected).
+   - `create_pr` (Handle existing PRs gracefully). -> `task_complete`.
+
+*** 🛡️ FILE EDITING & OPERATIONS PROTOCOL ***
+**A. TOOL SELECTION STRATEGY**
+1. **NEW Feature / New File** 👉 Use `write_file`.
+2. **ADD to END of file** (New endpoints/classes) 👉 Use `append_file` (Safest).
+3. **MODIFY Existing Logic** 👉 Use `edit_file`.
+4. **SMALL FILES (<100 lines)** 👉 Use `write_file` to rewrite the ENTIRE file (Prevents "layered" code & import errors).
+
+**B. EDITING RULES (Smart Editing)**
+- **Safety**: `read_file` before `edit_file`. Target text MUST exist exactly.
+- **Indentation**: Target a SINGLE unique line (Anchor) and replace with "Anchor + New Block".
+- **Escalation**: If `edit_file` fails twice, STOP. Use `write_file` to rewrite the whole file.
+
+**C. FORMATTING (The "Last Code Block" Rule)**
+- You MUST wrap code in **TRIPLE BACKTICKS** (```python ... ```).
+- **For `write_file` / `append_file`**: JSON arg `"content": "LAST_CODE_BLOCK"`.
+- **For `edit_file`**: JSON arg `"replacement_text": "LAST_CODE_BLOCK"`.
+- `target_text` must be the EXACT code string to remove. NEVER use "LAST_CODE_BLOCK" in `target_text`.
+
+*** 🕵️ TROUBLESHOOTING & SELF-CORRECTION ***
+**1. IMPORT RULE**: If you use `re`, `json`, `os`, `BaseModel`, you MUST verify imports exist at the top. `edit_file` often misses this.
+**2. JSON POST RULE**: In FastAPI, ALWAYS use Pydantic `BaseModel` for JSON bodies. Never use raw dicts.
+**3. LOOP DETECTION**: If a test fails with the same error after an edit, DO NOT repeat the same action.
+   - Check: Did I miss an import? (`NameError`)
+   - Check: Is my Pydantic schema correct? (`422 Unprocessable Entity`)
+   - Check: Did `edit_file` actually apply? (Read the file again).
+**4. TEST MATH**: If code matches spec but test fails, check if the *test expectation* is wrong based on scoring rules.
+**5. GIT CONFLICTS**: If `git_pull` fails, `read_file` to find `<<<<<<<`. Manually merge with `write_file`. NEVER commit markers.
+
+*** 💻 TECHNICAL CONSTRAINTS ***
+1. **JSON SYNTAX**: No triple quotes (`\"\"\"`) inside JSON values. Use `\\n`.
+2. **PR HANDLING**: If "PR already exists", assume success. Do NOT use placeholders (`<token>`).
+3. **WINDOWS SHELL (CRITICAL)**: 
+   - 🚫 **NEVER use Single Quotes (`'`)** for arguments in `run_command`. Windows CMD does not support them.
+   - ✅ **ALWAYS use Double Quotes (`"`)** for strings with spaces.
+   - ❌ WRONG: `git commit -m 'My Message'`
+   - ✅ RIGHT: `git commit -m "My Message"`
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
@@ -631,13 +531,31 @@ def run_hephaestus_task(task: str, max_steps: int = 35):
                     break
                 else:
                     task_finished = True
-                    result = args.get("summary", "Done")
-                    step_outputs.append(f"Task Completed: {result}")
+                    result_for_ai = args.get("summary", "Done")
+                    step_outputs.append(f"Task Completed: {result_for_ai}")
                     break
 
             if action not in TOOLS:
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
+
+            # 🛠️ LONG-TERM FIX: ตรวจสอบก่อนรันจริง
+            if "LAST_CODE_BLOCK" in str(args):
+                # ถ้าไม่มี Code Block ในรอบนี้ และไม่มีของเก่าค้างใน Memory
+                if not persistent_code_block:
+                    print("🛡️ INTERCEPTED: Agent forgot code block. Rejecting action.", file=sys.stderr)
+
+                    # สร้าง Error Message แบบสอนงานทันที
+                    rejection_msg = (
+                        "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but you forgot to write the Markdown code block!\n"
+                        "RULE: You MUST write the code block (```python ... ```) in the SAME message as the JSON.\n"
+                        "👉 Please rewrite the code block NOW, then send the JSON again."
+                    )
+
+                    # ยัดใส่ History ให้มันรู้ตัว แล้วข้ามไปรอบถัดไปเลย (ไม่กิน Step ฟรี)
+                    history.append({"role": "assistant", "content": content})
+                    history.append({"role": "user", "content": rejection_msg})
+                    continue  # 🔄 วนกลับไปเริ่ม Loop ใหม่ทันที
 
             # =========================================================
             # 🟢 [แก้ตรงนี้ 2] แทนที่ Logic เดิมด้วยอันนี้
@@ -676,16 +594,34 @@ def run_hephaestus_task(task: str, max_steps: int = 35):
                         print(f"📝 Auto-attached content from {origin} to {args.get('file_path')}")
 
                     else:
-                        # ❌ กรณีที่ทั้งรอบนี้และรอบก่อนๆ ไม่มี Code Block เลย
-                        print("🚫 ERROR: No Markdown block found in memory.")
-                        error_msg = (
-                            "❌ SYNTAX ERROR: I cannot find any code block to write!\n"
-                            "⚠️ You used 'LAST_CODE_BLOCK', but no Markdown code block was found in your current or previous responses.\n"
-                            "👉 Please provide the code wrapped in triple backticks (```python ... ```) before calling this tool."
-                        )
-                        step_outputs.append(error_msg)
-                        history.append({"role": "assistant", "content": content})
-                        history.append({"role": "user", "content": error_msg})
+                        # ❌ กรณีที่หา Code Block ไม่เจอ
+                        print("🚫 ERROR: No Markdown block found in memory.", file=sys.stderr)
+
+                        # --- 🛡️ ANTI-LOOP LOGIC (เพิ่มส่วนนี้) ---
+                        # เช็คว่า Error นี้เพิ่งเกิดขึ้นในรอบที่แล้วหรือเปล่า?
+                        if len(history) >= 2 and "SYNTAX ERROR" in history[-1]["content"]:
+                            # ถ้าซ้ำ 2 รอบติด ให้ด่าแรงขึ้นและบังคับหยุด
+                            critical_error_msg = (
+                                "🛑 SYSTEM HALT: You are stuck in a loop!\n"
+                                "You keep trying to use 'LAST_CODE_BLOCK' without writing the code first.\n"
+                                "RULE: You MUST write the Python code in a Markdown block (```python ... ```) in your message BEFORE sending the JSON."
+                            )
+                            step_outputs.append(critical_error_msg)
+                            history.append({"role": "user", "content": critical_error_msg})
+
+                            # (Option) ถ้าอยากให้หยุดโปรแกรมเลยเมื่อ Loop เกิน 3 รอบ
+                            # raise Exception("AI Stuck in Infinite Loop")
+                        else:
+                            # Error รอบแรก (แจ้งเตือนปกติ)
+                            error_msg = (
+                                "❌ SYNTAX ERROR: I cannot find any code block to write!\n"
+                                "⚠️ You used 'LAST_CODE_BLOCK', but no Markdown code block was found in your current or previous responses.\n"
+                                "👉 STOP APOLOGIZING. JUST WRITE THE CODE BLOCK NOW."
+                            )
+                            step_outputs.append(error_msg)
+                            history.append({"role": "assistant", "content": content})
+                            history.append({"role": "user", "content": error_msg})
+
                         continue
 
                 # =========================================================
@@ -790,22 +726,22 @@ def run_hephaestus_task(task: str, max_steps: int = 35):
 
             print(f"🔧 Executing: {action}")
             # 1. รันเครื่องมือตามปกติ
-            result = execute_tool_dynamic(action, args)
+            res_data = execute_tool_dynamic(action, args)
+            result_for_ai = res_data["output"]
 
             # 2. ตรวจสอบผลลัพธ์: ถ้าเป็นการ "แก้ไขไฟล์" และ "สำเร็จ"
-            file_modifying_actions = ["write_file", "append_file", "edit_file"]
-
-            if action in file_modifying_actions and "✅" in result:
-                # 🧹 ล้างความจำทันทีเพื่อให้สเต็ปถัดไป "สะอาด"
+            file_tools = ["write_file", "append_file", "edit_file"]
+            if action in file_tools and res_data["success"]:
                 persistent_code_block = None
-                print(f"🧹 Memory flushed after successful {action}. Ready for new code.")
+                # ใช้ sys.stderr เพื่อให้ Log ไปโผล่ใน Claude Desktop โดยไม่ทำให้ระบบพัง
+                print(f"DEBUG: Memory flushed for {action}", file=sys.stderr)
 
             # =========================================================
             # 🟢 [NEW] BATCHING DETECTOR (แจ้งเตือน AI ถ้ามันเผลอรัวคำสั่ง)
             # =========================================================
             if len(tool_calls) > 1:
                 print(f"⚠️ Warning: Agent tried to batch {len(tool_calls)} tools. Executing only the first one.")
-                result += (
+                result_for_ai += (
                     f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
                     f"You sent {len(tool_calls)} actions at once. "
                     f"I executed ONLY the first one ('{action}'). "
@@ -815,15 +751,15 @@ def run_hephaestus_task(task: str, max_steps: int = 35):
 
             # Show brief result
             display = f"✅ File operation success: {args.get('file_path')}" if "success" in str(
-                result).lower() and action.startswith("write") else result
+                result_for_ai).lower() and action.startswith("write") else result_for_ai
             print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
 
-            step_outputs.append(f"Tool Output ({action}): {result}")
+            step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
             break  # Atomic execution
 
         if task_finished:
-            print(f"\n✅ BUILD COMPLETE: {result}")
-            return result
+            print(f"\n✅ BUILD COMPLETE: {result_for_ai}")
+            return result_for_ai
 
         history.append({"role": "assistant", "content": content})
         history.append({"role": "user", "content": "\n".join(step_outputs)})

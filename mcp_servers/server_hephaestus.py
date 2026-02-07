@@ -5,6 +5,15 @@ import contextlib
 import threading
 import time
 import uuid
+import io  # เพิ่ม io
+# ------------------------------------------------------------------
+# 1. 🛑 STOP STDOUT LEAKS IMMEDIATELY (ทำก่อน import อื่นๆ)
+# ------------------------------------------------------------------
+if sys.platform == "win32":
+    # บังคับ UTF-8
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 

@@ -1,4 +1,5 @@
 # file: core/network_fix.py
+import sys
 import socket
 import requests.sessions
 import urllib3
@@ -50,4 +51,4 @@ def patched_request(self, method, url, *args, **kwargs):
 # เริ่มการทำงานของ Patch ทันทีที่ import ไฟล์นี้
 requests.sessions.Session.request = patched_request
 
-print("✅ Network Fix Applied: Connection secured with Fake Chrome Headers!")
+print("Network Fix Applied: Connection secured with Fake Chrome Headers!", file=sys.stderr)
