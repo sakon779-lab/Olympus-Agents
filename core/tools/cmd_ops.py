@@ -70,15 +70,25 @@ def run_command(command: str, cwd: str = None, timeout: int = 300) -> str:
             timeout=timeout  # ✅ กันค้าง (Timeout)
         )
 
-        output = result.stdout.strip()
-        error = result.stderr.strip()
+        # ✅ รวม Output ทั้งหมด (stdout + stderr)
+        full_output = f"{result.stdout}\n{result.stderr}".strip()
 
+        # กรณีสำเร็จ (Exit Code 0)
         if result.returncode == 0:
-            return f"✅ Command Success:\n{output}"
-        else:
-            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
+            return full_output if full_output else "✅ Command executed successfully (No output)."
+
+        # กรณี Test Failed (Exit Code 1) -> เรายังต้องการดู Output!
+        # กรณี Error อื่นๆ -> เราก็ยังต้องการดู Output อยู่ดี!
+        error_msg = (
+            f"⚠️ Command finished with Exit Code {result.returncode}:\n"
+            f"----------------------------------------\n"
+            f"{full_output}\n"  # <--- ไฮไลท์: ส่ง Output กลับไปให้ Agent อ่านด้วย
+            f"----------------------------------------"
+        )
+        logger.warning(f"Cmd Failed: {command}")
+        return error_msg
 
     except subprocess.TimeoutExpired:
-        return f"⏰ Command Timeout! (Over {timeout}s). Process killed."
+        return f"❌ Error: Command timed out after {timeout} seconds."
     except Exception as e:
-        return f"❌ Execution Error: {e}"
+        return f"❌ Execution Error: {str(e)}"

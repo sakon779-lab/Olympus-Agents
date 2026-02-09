@@ -148,25 +148,79 @@ TOOLS = {
 import sys
 from typing import Dict, Any, Tuple
 
+# 1. นิยาม Schema (กฎเหล็ก) ของแต่ละ Tool
+TOOL_SCHEMAS = {
+    "edit_file": {
+        "required": ["target_text", "replacement_text"],
+        "file_path": True
+    },
+    "write_file": {
+        "required": ["content"],
+        "file_path": True
+    },
+    "append_file": {
+        "required": ["content"],
+        "file_path": True
+    },
+    "read_file": {
+        "required": [],
+        "file_path": True
+    },
+    # Tool อื่นๆ ใส่เพิ่มตรงนี้...
+}
+
 
 def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    # 0. เช็คว่ารู้จัก Tool นี้ไหม
     if tool_name not in TOOLS:
         return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
 
+    # 🛡️ VALIDATION LAYER: ตรวจสอบ Argument ก่อนรันจริง
+    if tool_name in TOOL_SCHEMAS:
+        schema = TOOL_SCHEMAS[tool_name]
+
+        # สร้าง Set ของ Key ที่ถูกต้อง
+        valid_keys = set(schema["required"])
+        if schema.get("file_path"):
+            valid_keys.add("file_path")
+
+        received_keys = set(args.keys())
+        unknown_keys = received_keys - valid_keys
+
+        # 1. เช็ค Key ผี (เกินมา)
+        if unknown_keys:
+            error_msg = (
+                f"[ERROR] Invalid arguments for '{tool_name}'.\n"
+                f"❌ Unknown arguments: {list(unknown_keys)}\n"
+                f"✅ Expected arguments: {list(valid_keys)}\n"
+                f"👉 Please CORRECT your JSON and try again."
+            )
+            # ⚠️ ต้อง return Dict เสมอ!
+            return {"success": False, "output": error_msg}
+
+        # 2. เช็ค Key ขาด (หายไป)
+        missing_keys = [k for k in schema["required"] if k not in args]
+        if missing_keys:
+            return {"success": False, "output": f"[ERROR] Missing required arguments for '{tool_name}': {missing_keys}"}
+
+        # 3. เช็ค file_path (ถ้าจำเป็น)
+        if schema.get("file_path") and "file_path" not in args:
+            return {"success": False, "output": f"[ERROR] Missing required arguments for '{tool_name}': ['file_path']"}
+
+    # 🚀 EXECUTION LAYER: รันของจริง
     try:
         func = TOOLS[tool_name]
-        # 1. รันฟังก์ชันจริง ได้ผลลัพธ์ดิบมา (มักเป็น String ที่มี ✅)
+
+        # 1. รันฟังก์ชัน
         raw_result = str(func(**args))
 
         # 2. ตรวจสอบ "เจตนา" ของผลลัพธ์ (Success Detection)
-        # เราเช็คจากตัว ✅ ก่อนที่จะลบมันทิ้งเพื่อความปลอดภัยของ MCP
         is_success = "✅" in raw_result or "SUCCESS" in raw_result.upper()
 
-        # 3. 🧹 MCP & Windows Safety: ลบ Emoji และตัวอักษรพิเศษที่อาจทำให้ Encode พัง
-        # เปลี่ยน ✅ เป็น [SUCCESS] เพื่อให้ Claude อ่านง่ายและไม่พังบน Windows
+        # 3. 🧹 Cleaning: ลบ Emoji เพื่อความปลอดภัยของ MCP บน Windows
         clean_output = raw_result.replace("✅", "[SUCCESS]").replace("❌", "[ERROR]")
 
-        # 4. ส่งกลับเป็นโครงสร้างมาตรฐาน
+        # 4. ส่งกลับ
         return {
             "success": is_success,
             "output": clean_output
@@ -180,14 +234,26 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
         }
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT
+# 🧠 SYSTEM PROMPT (UPDATED)
 # ==============================================================================
 SYSTEM_PROMPT = """
 You are "Hephaestus", the Senior Python Developer of Olympus.
 Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), CONTAINERIZE (Compose), and Submit a PR.
 
+*** 🛑 SUPER STRICT ATOMICITY (ZERO TOLERANCE) ***
+- You are PROHIBITED from sending multiple JSON actions in one turn.
+- ❌ BAD: `[{"action": "write_file"...}, {"action": "run_command"...}]`
+- ✅ GOOD: `{"action": "write_file"...}` (Wait for result) -> `{"action": "run_command"...}`
+- If you batch commands, the second command WILL FAIL and you will lose progress.
+
+*** 🛡️ SPECIALIZED CODING RULES ***
+1. **PYDANTIC VALIDATORS**: When fixing Pydantic validators (`@validator`, `@field_validator`), DO NOT use `edit_file`. Always use `write_file` to redefine the entire Pydantic model class.
+
 *** 👑 CORE PHILOSOPHY & METHODOLOGY ***
 1. **JIRA IS GOD**: The Jira Ticket is the ONLY truth. Ignore legacy code intent; build what Jira asks.
+   - 🛑 **DO NOT ASSUME**: Do not use "standard practices" if they conflict with the prompt.
+   - 🛑 **LITERAL INTERPRETATION**: If the prompt implies "Start at 0 and add points", DO NOT use subtraction unless explicitly asked.
+   - 🛑 **NO OVER-ENGINEERING**: Build EXACTLY what is asked. Do not add extra features or validation rules not specified.
 2. **SDD (Spec-Driven)**: You MUST create `docs/specs.md` before writing code. All Logic/Tests derive from this.
 3. **TDD (Test-Driven)**: 🔴 RED (Fail) -> 🟢 GREEN (Pass) -> 🔵 REFACTOR. Never commit failing tests.
 4. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
@@ -198,10 +264,13 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 2. **NO CONVERSATION**: Do not offer advice, tutorials, or steps for the user. Just DO the work.
 3. **SILENT EXECUTION**: If you need to check something, use a Tool. Do not ask the user for permission or confirmation.
 
-*** 📉 JSON SAFETY PROTOCOL ***
+*** 📉 JSON SAFETY PROTOCOL (CRITICAL) ***
 - **KEEP IT SHORT**: When using `write_file`, do not put extremely long markdown content in a single JSON string if possible.
 - **ESCAPE PROPERLY**: Ensure all double quotes (`"`) inside the content are escaped as (`\"`) and newlines as (`\\n`).
-- **RETRY STRATEGY**: If writing `docs/specs.md` fails, try writing a simpler version first.
+- **NO NESTED JSON BLOCKS**: When writing Markdown that contains JSON examples, DO NOT use triple backticks + json syntax inside the `write_file` content string. It breaks the parser.
+  - ❌ BAD: "... ```json {\\\"key\\\": \\\"val\\\"} ``` ..."
+  - ✅ GOOD: "... Input: { key: val } ..." (Use simplified text representation instead)
+- **RETRY STRATEGY**: If writing `docs/specs.md` fails, try writing a simpler version without complex formatting.
 
 *** 🧹 CODE ARCHITECTURE RULE ***
 1. **SEPARATION OF CONCERNS**:
@@ -236,13 +305,28 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 2. **ADD to END of file** (New endpoints/classes) 👉 Use `append_file` (Safest).
 3. **MODIFY Existing Logic** 👉 Use `edit_file`.
 4. **SMALL FILES (<100 lines)** 👉 Use `write_file` to rewrite the ENTIRE file (Prevents "layered" code & import errors).
+5. *** 🛠️ TOOL USAGE RULES (CRITICAL) ***
+   - **edit_file**:
+     - ❌ WRONG: `{"content": "..."}`
+     - ✅ RIGHT: `{"target_text": "...", "replacement_text": "..."}`
+     - Note: `target_text` must be EXACTLY what is currently in the file.
+   - **edit_file vs write_file**: 
+     - If you need to fix IndentationErrors or complex nested blocks, DO NOT use `edit_file`.
+     - Use `write_file` to rewrite the whole file immediately. It is cheaper than failing 3 times.
 
 **B. EDITING RULES (Smart Editing)**
 - **Safety**: `read_file` before `edit_file`. Target text MUST exist exactly.
 - **Indentation**: Target a SINGLE unique line (Anchor) and replace with "Anchor + New Block".
 - **Escalation**: If `edit_file` fails twice, STOP. Use `write_file` to rewrite the whole file.
 
-**C. FORMATTING (The "Last Code Block" Rule)**
+**C. ROBUST EDITING STRATEGY (CRITICAL)**
+- **PREFER OVERWRITE**: When fixing bugs or failing tests, DO NOT use `edit_file`.
+  - ❌ Risky: Trying to match exact whitespace with `edit_file`.
+  - ✅ Safe: Use `write_file` to provide the FULL corrected file content.
+- **SIZE LIMIT**: If modifying > 5 lines of code, ALWAYS use `write_file`.
+- **SINGLE LINE ONLY**: `edit_file` is ONLY for small, single-line fixes.
+
+**D. FORMATTING (The "Last Code Block" Rule)**
 - You MUST wrap code in **TRIPLE BACKTICKS** (```python ... ```).
 - **For `write_file` / `append_file`**: JSON arg `"content": "LAST_CODE_BLOCK"`.
 - **For `edit_file`**: JSON arg `"replacement_text": "LAST_CODE_BLOCK"`.
@@ -257,6 +341,10 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - Check: Did `edit_file` actually apply? (Read the file again).
 **4. TEST MATH**: If code matches spec but test fails, check if the *test expectation* is wrong based on scoring rules.
 **5. GIT CONFLICTS**: If `git_pull` fails, `read_file` to find `<<<<<<<`. Manually merge with `write_file`. NEVER commit markers.
+**6. DEBUGGING PROTOCOL**: 
+   - 🛑 STOP AND READ: If `pytest` fails, DO NOT randomly change numbers/logic immediately.
+   - 🔍 ANALYZE: Use `run_command` to check the EXACT error message or assertion failure.
+   - 💡 FIX: Only apply a fix when you understand WHY it failed.
 
 *** 💻 TECHNICAL CONSTRAINTS ***
 1. **JSON SYNTAX**: No triple quotes (`\"\"\"`) inside JSON values. Use `\\n`.

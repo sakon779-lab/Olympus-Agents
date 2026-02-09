@@ -6,6 +6,7 @@ from typing import List, Dict
 # from langchain_chroma import Chroma
 # from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
+from core.config import settings
 
 # Setup Path
 CURRENT_FILE_PATH = os.path.abspath(__file__)
@@ -40,8 +41,8 @@ def get_vector_db():
 
         # 1. Init Embeddings
         _EMBEDDINGS = OllamaEmbeddings(
-            model="nomic-embed-text",
-            base_url="http://localhost:11434"
+            model=settings.EMBEDDING_MODEL,  # "nomic-embed-text"
+            base_url=settings.OLLAMA_LOCAL_URL  # "http://localhost:11434"
         )
 
         # 2. Init Chroma

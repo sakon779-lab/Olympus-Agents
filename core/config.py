@@ -38,11 +38,30 @@ class Settings(BaseSettings):
     # รายชื่อ Agent ที่สังกัดทีม QA (จะถูกบังคับให้ใช้ QA Repo)
     QA_AGENT_NAMES: List[str] = ["Athena", "Artemis"]
 
-    # ✅ AI CONFIGURATION
-    # OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_BASE_URL: str = "https://l83lnu9nu2pig6-11434.proxy.runpod.net"
+    # =========================================================
+    # ☁️ REMOTE CONFIG (สำหรับ Chat / Inference - ตัวเก่งแต่หนัก)
+    # =========================================================
+    # URL ของ RunPod (หรือ Cloud อื่นๆ)
+    # OLLAMA_BASE_URL: str = "http://localhost:11434" # กรณีรัน Local ทั้งหมด
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://w5671timrpathi-11434.proxy.runpod.net")
+
     # แนะนำใช้ 7b ถ้าเครื่อง RAM น้อย หรือ 14b ถ้าเครื่องแรง
-    MODEL_NAME: str = "qwen2.5-coder:14b"
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5-coder:32b")
+
+    # AI Temperature (0.0 = แม่นยำ/coding, 0.7 = ความคิดสร้างสรรค์)
+    TEMPERATURE: float = 0.2
+
+    # =========================================================
+    # 🏠 LOCAL CONFIG (สำหรับ Embedding / Vector DB - ตัวเล็กเร็วๆ)
+    # =========================================================
+    # URL ของเครื่องตัวเอง (Localhost)
+    OLLAMA_LOCAL_URL: str = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
+
+    # Model สำหรับแปลงข้อความ (Nomic กินทรัพยากรน้อย รัน local ไหว)
+    EMBEDDING_MODEL: str = "nomic-embed-text"
+
+    # Path ที่เก็บ Vector DB
+    CHROMA_DB_DIR: str = os.path.join(os.getcwd(), "chroma_db")
 
     # =========================================================
     # ⚙️ LOGIC PROPERTIES (The Magic Happens Here)

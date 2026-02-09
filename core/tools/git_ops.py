@@ -60,6 +60,13 @@ def run_git_cmd(command: str, cwd: str, timeout: int = 60) -> str:
         raise e
 
 
+def _get_current_branch() -> str:
+    """Helper to get current branch name."""
+    try:
+        return run_git_cmd("git branch --show-current", cwd=settings.AGENT_WORKSPACE).strip()
+    except:
+        return None
+
 # ==============================================================================
 # 🔧 GIT SETUP
 # ==============================================================================
@@ -209,47 +216,53 @@ def git_commit(message: str) -> str:
         return f"❌ Commit Failed: {e}"
 
 
-def git_push(branch_name: str) -> str:
+def git_push(branch_name: str = None) -> str:
     """
-    Pushes changes to remote.
-    🤖 SMART LOGIC: If a normal push fails (non-fast-forward) on a feature branch,
-    it automatically attempts a FORCE PUSH to overwrite the stale remote branch.
+    Push to remote.
+    🤖 SMART: Auto-detects branch if None. Handles Force Push for feature branches.
     """
     workspace = settings.AGENT_WORKSPACE
 
-    # 1. เช็ค Branch ปัจจุบัน
+    # ✅ 1. Auto-Detect Branch
+    if not branch_name:
+        branch_name = _get_current_branch()
+        if not branch_name:
+            return "❌ Error: Could not detect current branch. Please provide branch_name."
+
+    # 2. Safety Check (Prevent pushing to protected branches directly if force needed)
+    is_protected = branch_name in ["main", "master", "production"]
+
+    # 3. Try Standard Push
     try:
-        current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
-        if branch_name != current_branch:
-            return f"❌ Error: You are on branch '{current_branch}', but tried to push '{branch_name}'."
+        cmd = f"git -c credential.helper= push -u origin {branch_name}"
+        result = run_git_cmd(cmd, cwd=workspace)
+
+        # Check specific error from our helper
+        if "ERROR_NON_FAST_FORWARD" in result:
+            raise subprocess.CalledProcessError(1, cmd, output=result, stderr=result)
+
+        return f"✅ Push Success: {branch_name}"
+
+    except subprocess.CalledProcessError as e:
+        # 4. Handle Non-Fast-Forward (Force Push)
+        err_msg = e.stderr.lower() if e.stderr else ""
+        if "non-fast-forward" in err_msg or "fetch first" in err_msg:
+
+            if is_protected:
+                return f"❌ Push Failed: Remote is ahead. Please 'git_pull' first. (Force push blocked on {branch_name})"
+
+            # 🔥 Force Push for Feature Branch
+            logger.warning(f"⚠️ Non-fast-forward detected. Force pushing to {branch_name}...")
+            try:
+                force_cmd = f"git -c credential.helper= push -f -u origin {branch_name}"
+                run_git_cmd(force_cmd, cwd=workspace)
+                return f"✅ Push Success (Forced): {branch_name} updated."
+            except Exception as fe:
+                return f"❌ Force Push Failed: {fe}"
+
+        return f"❌ Push Error: {e}"
     except Exception as e:
-        return f"❌ Git Error: {e}"
-
-    # 2. ลอง Push แบบปกติ (Standard Push)
-    cmd = f"git -c credential.helper= push -u origin {branch_name}"
-    result = run_git_cmd(cmd, cwd=workspace)
-
-    # 3. 🚨 เช็คว่าพังไหม? (Auto-Recovery Logic)
-    # ถ้า Error บอกว่า [rejected] ... (non-fast-forward)
-    if "error" in result.lower() and "non-fast-forward" in result.lower():
-
-        # 🛡️ Safety Guard: ห้าม Force Push ใส่ Main/Master เด็ดขาด!
-        if branch_name in ["main", "master", "production"]:
-            return f"❌ Push Failed: Remote branch is ahead. Please 'git_pull' first. (Force push blocked on {branch_name})"
-
-        # ⚡ EXECUTE FORCE PUSH (แก้ปัญหา Stale Remote)
-        print(f"⚠️ Git Push Failed (Non-fast-forward). Attempting FORCE PUSH on feature branch '{branch_name}'...")
-
-        force_cmd = f"git -c credential.helper= push -f -u origin {branch_name}"
-        force_result = run_git_cmd(force_cmd, cwd=workspace)
-
-        if "error" not in force_result.lower():
-            return f"✅ Push Success (Forced Update): {branch_name} has been overwritten with your latest code."
-        else:
-            return f"❌ Force Push Failed: {force_result}"
-
-    # ถ้า Push ปกติผ่าน หรือ Error เรื่องอื่น
-    return result
+        return f"❌ Push Error: {e}"
 
 
 def git_pull(branch_name: str = None) -> str:
