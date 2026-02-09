@@ -406,7 +406,7 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task: str, max_steps: int = 35):
+def run_hephaestus_task(task: str, max_steps: int = 45):
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         settings.CURRENT_AGENT_NAME = "Hephaestus"
 
