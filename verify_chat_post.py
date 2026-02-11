@@ -16,9 +16,9 @@ def allowed_gai_family():
 connection.allowed_gai_family = allowed_gai_family
 
 # 3. 🎯 ตั้งค่าเป้าหมาย
-base_url = "https://l83lnu9nu2pig6-11434.proxy.runpod.net"
+base_url = "https://9gjwsbc50f6jyt-11434.proxy.runpod.net"
 chat_url = f"{base_url}/api/chat"
-model_name = "qwen2.5-coder:14b"  # เอาชื่อมาจากที่คุณเช็คเจอเมื่อกี้
+model_name = "qwen2.5-coder:32b"  # เอาชื่อมาจากที่คุณเช็คเจอเมื่อกี้
 
 # 4. 🎭 หน้ากาก Chrome (ห้ามลืม!)
 headers = {

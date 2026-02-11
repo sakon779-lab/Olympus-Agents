@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # =========================================================
     # URL ของ RunPod (หรือ Cloud อื่นๆ)
     # OLLAMA_BASE_URL: str = "http://localhost:11434" # กรณีรัน Local ทั้งหมด
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://w5671timrpathi-11434.proxy.runpod.net")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://9gjwsbc50f6jyt-11434.proxy.runpod.net")
 
     # แนะนำใช้ 7b ถ้าเครื่อง RAM น้อย หรือ 14b ถ้าเครื่องแรง
     MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5-coder:32b")

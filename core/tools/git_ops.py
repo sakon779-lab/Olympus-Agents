@@ -70,33 +70,38 @@ def _get_current_branch() -> str:
 # ==============================================================================
 # 🔧 GIT SETUP
 # ==============================================================================
-def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
+def git_setup_workspace(issue_key: str, base_branch: str = "main", agent_name: str = "ai-agent",
+                        job_id: str = None) -> str:
     remote_url = settings.TARGET_REPO_URL
     agent_workspace = settings.AGENT_WORKSPACE
-    feature_branch = f"feature/{issue_key}"
 
-    logger.info(f"🔧 Agent '{settings.CURRENT_AGENT_NAME}' setup...")
+    # ✅ สูตรการตั้งชื่อ Branch (เหมือนเดิม)
+    if job_id:
+        feature_branch = f"feature/{issue_key}-{agent_name}-{job_id}"
+    else:
+        feature_branch = f"feature/{issue_key}-{agent_name}"
+
+    logger.info(f"🔧 Agent '{agent_name}' setup...")
     logger.info(f"   📂 Workspace: {agent_workspace}")
+    logger.info(f"   🌿 Target Branch: {feature_branch}")
 
     try:
-        # STEP 0: Zombie Cleanup
+        # STEP 0: Zombie Cleanup (เหมือนเดิม)
         if os.path.exists(agent_workspace):
             git_folder = os.path.join(agent_workspace, ".git")
             if not os.path.exists(git_folder):
                 logger.warning(f"⚠️ Corrupt workspace found. Deleting...")
                 shutil.rmtree(agent_workspace, ignore_errors=True)
 
-        # STEP 1: Clone (Quiet Mode + No Credential Helper)
+        # STEP 1: Clone (เหมือนเดิม)
         if not os.path.exists(agent_workspace):
             logger.info(f"⬇️ Cloning repository...")
             os.makedirs(agent_workspace, exist_ok=True)
-
-            # ✅ FIX: เพิ่ม --quiet เพื่อแก้ปัญหาท่อตัน
             cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
             run_git_cmd(cmd, cwd=agent_workspace)
         else:
             try:
-                logger.info(f"📂 Workspace exists. Verifying remote...")
+                # Verify remote (เหมือนเดิม)
                 current_remote = run_git_cmd("git config --get remote.origin.url", cwd=agent_workspace)
                 if settings.GITHUB_TOKEN and settings.GITHUB_TOKEN not in current_remote:
                     logger.warning(f"⚠️ Remote token mismatch. Re-cloning...")
@@ -105,99 +110,77 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main") -> str:
                     cmd = f'git clone --quiet -c credential.helper= --no-checkout "{remote_url}" .'
                     run_git_cmd(cmd, cwd=agent_workspace)
             except Exception as e:
-                logger.warning(f"⚠️ Remote check skipped: {e}")
+                pass
 
-        # STEP 2: Detect Branch
-        logger.info("🕵️ Detecting branch...")
-        output = run_git_cmd("git -c credential.helper= remote show origin", cwd=agent_workspace)
-        match = re.search(r"HEAD branch:\s+(.*)", output)
-        base_branch = match.group(1).strip() if match else "main"
+        # STEP 2: Detect Base Branch (Auto-detect logic)
+        logger.info("🕵️ Detecting base branch...")
+        try:
+            output = run_git_cmd("git -c credential.helper= remote show origin", cwd=agent_workspace)
+            match = re.search(r"HEAD branch:\s+(.*)", output)
+            if match:
+                base_branch = match.group(1).strip()
+        except:
+            pass  # ถ้าหาไม่เจอ ใช้ default ที่ส่งมา ("main")
+
         logger.info(f"✅ Base Branch: {base_branch}")
 
-        # STEP 3: Config & Checkout
+        # STEP 3: Config User (เหมือนเดิม)
         run_git_cmd(f'git config user.name "{settings.CURRENT_AGENT_NAME}"', cwd=agent_workspace)
         run_git_cmd('git config user.email "ai@olympus.dev"', cwd=agent_workspace)
 
-        run_git_cmd(f"git checkout {base_branch}", cwd=agent_workspace)
-        run_git_cmd(f"git -c credential.helper= pull --quiet origin {base_branch}", cwd=agent_workspace)
+        # ---------------------------------------------------------
+        # 🚀 OPTIMIZED GIT FLOW (แก้ตรงนี้!)
+        # ---------------------------------------------------------
+        # 1. ดึงข้อมูลล่าสุดจาก Server มาเก็บไว้ใน .git (ไม่แตะไฟล์งาน)
+        logger.info(f"📡 Fetching latest {base_branch} from remote...")
+        run_git_cmd(f"git fetch origin {base_branch}", cwd=agent_workspace)
 
-        # STEP 4: Switch to Feature
-        logger.info(f"🌿 Switching to {feature_branch}")
-        # -B จะ reset branch pointer ใหม่เสมอ (เหมือนเริ่มใหม่ทุกครั้ง) เหมาะกับ Agent มาก
-        run_git_cmd(f"git checkout -B {feature_branch}", cwd=agent_workspace)
+        # 2. สร้าง Feature Branch ใหม่ โดยให้เริ่มจาก origin/{base_branch} ทันที
+        # -B : Force create/reset branch (ถ้ามีอยู่แล้วก็ทับเลย)
+        # origin/{base_branch} : ต้นฉบับจาก Server (สดใหม่แน่นอน)
+        logger.info(f"🌿 Creating/Resetting {feature_branch} from origin/{base_branch}")
+        run_git_cmd(f"git checkout -B {feature_branch} origin/{base_branch}", cwd=agent_workspace)
+        # ---------------------------------------------------------
 
         # =========================================================
-        # 🆕 SYSTEM: Auto-Create Venv (Powered by run_command)
+        # 🆕 SYSTEM: Auto-Create Venv (เหมือนเดิม)
         # =========================================================
         venv_path = os.path.join(agent_workspace, ".venv")
 
         if not os.path.exists(venv_path):
-            logger.info(f"📦 Creating virtual environment at: {venv_path}...")
-
-            # 💡 TRICK: ใช้ sys.executable เพื่อเรียก Python ตัวเดียวกับที่รัน Agent
-            # ใส่ฟันหนู "" ครอบ Path กันกรณีมีเว้นวรรค (เช่น C:\Program Files\...)
+            logger.info(f"📦 Creating virtual environment...")
             create_cmd = f'"{sys.executable}" -m venv .venv'
-
-            # เรียกใช้ run_command ตัวเก่งของคุณ
             result = run_command(create_cmd, cwd=agent_workspace, timeout=300)
 
             if "Success" in result:
-                logger.info("✅ .venv created successfully!")
-
-                # =========================================================
-                # 🛡️ OPTION: สร้างเกราะป้องกัน pip --user (ใส่ตรงนี้เลย!)
-                # =========================================================
-                if os.name == 'nt':  # เฉพาะ Windows
+                if os.name == 'nt':
                     try:
                         pip_ini_path = os.path.join(venv_path, "pip.ini")
                         with open(pip_ini_path, "w") as f:
                             f.write("[global]\nuser = false\n")
-                        logger.info("🛡️ pip.ini created: Blocked '--user' install.")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to create pip.ini: {e}")
-                # =========================================================
-            else:
-                logger.error(f"⚠️ Failed to create .venv: {result}")
-                # (Optional) ถ้าซีเรียสมาก ให้ return Error กลับไปเลย
-        else:
-            logger.info("ℹ️ .venv already exists.")
+                    except:
+                        pass
 
-        # ✅ STEP 5: Auto-Install Dependencies (Updated to use run_command)
+        # ✅ STEP 5: Auto-Install Dependencies (เหมือนเดิม)
         req_file = os.path.join(agent_workspace, "requirements.txt")
         if os.path.exists(req_file):
-            logger.info(f"📦 Found requirements.txt. Installing dependencies...")
-
-            # เลือก pip ให้ถูกตัว
+            logger.info(f"📦 Installing dependencies...")
             if os.name == 'nt':
                 pip_cmd = os.path.join(agent_workspace, ".venv", "Scripts", "pip.exe")
             else:
                 pip_cmd = os.path.join(agent_workspace, ".venv", "bin", "pip")
 
-            # สร้าง Command
-            # 💡 เพิ่ม --no-cache-dir เพื่อลดปัญหาพื้นที่เต็มและไฟล์ขยะ
             install_cmd = f'"{pip_cmd}" install --no-cache-dir -r requirements.txt'
-
-            # 🔥 เรียกใช้ run_command แทน subprocess
-            # ให้เวลา 600 วินาที (10 นาที) เผื่อเน็ตช้าหรือต้อง Compile library ใหญ่ๆ
-            result = run_command(install_cmd, cwd=agent_workspace, timeout=600)
-
-            # เช็คผลลัพธ์ (run_command มักจะคืนค่า text ออกมา ไม่ได้ raise error ตรงๆ)
-            # ขึ้นอยู่กับ implementation ของ run_command แต่ปกติถ้า error มันจะฟ้องใน text
-            if "Error" not in result and "Failed" not in result:
-                logger.info("✅ Dependencies installed successfully!")
-            else:
-                logger.error(f"❌ Failed to install dependencies. Output:\n{result}")
+            run_command(install_cmd, cwd=agent_workspace, timeout=600)
 
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
-                f"🌿 Branch: {feature_branch}\n"
-                f"🔗 Base: {base_branch}\n"
-                f"📦 Venv: Configured & Packages Installed")
+                f"🌿 Branch: {feature_branch} (Based on origin/{base_branch})\n"
+                f"📦 Venv: Configured")
 
     except Exception as e:
         logger.error(f"❌ Git Setup Error: {e}")
         return f"❌ Error: {e}"
-
 
 # ==============================================================================
 # 📝 OTHER GIT OPERATIONS
