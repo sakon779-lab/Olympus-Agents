@@ -6,6 +6,8 @@ import os
 import subprocess
 import ast
 import time
+from datetime import datetime
+import uuid
 from typing import Dict, Any, List, Tuple
 try:
     import core.network_fix
@@ -27,10 +29,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [H
 logger = logging.getLogger("Hephaestus")
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (FULL ORIGINAL + MD FIX)
+# 📝 DUAL LOGGER CLASS (New Feature!)
 # ==============================================================================
-# ใช้ตัวแปรนี้แทน Backticks เพื่อไม่ให้ Markdown ในแชทพัง
-MD_QUOTE = "```"
+class DualLogger:
+    """
+    Writes output to BOTH the terminal (stdout) and a log file simultaneously.
+    """
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log_file = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()  # Ensure real-time saving
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
 
 # ==============================================================================
 # 🧠 SYSTEM PROMPT (FULL ORIGINAL + MD FIX + MIDDLEWARE PROTOCOL)
@@ -92,14 +111,20 @@ This applies to write_file, append_file, and edit_file.
   (Wait for next turn to write test.py)
 
 *** 👑 CORE PHILOSOPHY & METHODOLOGY ***
-1. **JIRA IS GOD**: The Jira Ticket is the ONLY truth. Ignore legacy code intent; build what Jira asks.
-   - 🛑 **DO NOT ASSUME**: Do not use "standard practices" if they conflict with the prompt.
-   - 🛑 **LITERAL INTERPRETATION**: If the prompt implies "Start at 0 and add points", DO NOT use subtraction unless explicitly asked.
-   - 🛑 **NO OVER-ENGINEERING**: Build EXACTLY what is asked. Do not add extra features or validation rules not specified.
-2. **SDD (Spec-Driven)**: You MUST create `docs/specs.md` before writing code. All Logic/Tests derive from this.
-3. **TDD (Test-Driven)**: 🔴 RED (Fail) -> 🟢 GREEN (Pass) -> 🔵 REFACTOR. Never commit failing tests.
-4. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
-5. **NO HALLUCINATIONS**: If you didn't call `write_file`, the file wasn't created. Verify everything.
+1. **JIRA IS GOD**: The Jira Ticket is the ONLY truth for *new requirements*.
+2. **🛡️ DO NOT DELETE LEGACY CODE (CRITICAL)**: 
+   - You are working on an *existing* codebase. 
+   - **NEVER** overwrite/delete existing functions, classes, or endpoints unless explicitly asked to refactor/delete them.
+   - **MERGE STRATEGY**: When adding a new feature to `main.py`, you MUST:
+     1. `read_file("src/main.py")` to see existing code.
+     2. Keep all existing imports and endpoints (e.g., `/hello`, `/reverse`).
+     3. Add your NEW code *below* the existing code.
+     4. Use `write_file` with the *COMBINED* content (Old + New).
+
+3. **SDD (Spec-Driven)**: You MUST create `docs/specs.md` first.
+4. **TDD (Test-Driven)**: 🔴 Write failing test -> 🟢 Write code -> 🔵 Refactor.
+5. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
+6. **NO HALLUCINATIONS**: If you didn't call `write_file`, the file wasn't created. Verify everything.
 
 *** 🤖 AGENT BEHAVIOR (NO CHAT MODE) ***
 1. **YOU ARE HANDS-ON**: Never say "Please run this command". YOU run it using `run_command`.
@@ -343,342 +368,374 @@ def extract_code_block(text: str) -> str:
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_hephaestus_task(task: str, max_steps: int = 45):
+def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         settings.CURRENT_AGENT_NAME = "Hephaestus"
 
-    print(f"🔨 Launching Hephaestus (The Builder)...")
-    print(f"📋 Task: {task}")
+    # 1️⃣ SETUP LOGGING
+    if not job_id:
+        job_id = f"manual_{uuid.uuid4().hex[:8]}"
 
-    history = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": task}
-    ]
+    logs_dir = os.path.join("logs", "hephaestus")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_filename = os.path.join(logs_dir, f"job_{job_id}.log")
 
-    persistent_code_block = None
+    # 🌟 Redirect print to BOTH console and file
+    original_stdout = sys.stdout
+    dual_logger = DualLogger(log_filename)
+    sys.stdout = dual_logger
 
-    for step in range(max_steps):
-        print(f"\n🔄 Thinking (Step {step + 1})...")
-        try:
-            response = query_qwen(history)
-            if isinstance(response, dict):
-                content = response.get('message', {}).get('content', '') or response.get('content', '')
-            else:
-                content = str(response)
-        except Exception as e:
-            print(f"❌ Error querying LLM: {e}")
-            return
+    try:
+        print(f"\n==================================================")
+        print(f"🔨 Launching Hephaestus (The Builder)...")
+        print(f"▶️ [Worker] Starting Job {job_id}")
+        print(f"📅 Time: {datetime.now()}")
+        print(f"📋 Task: {task}")
+        print(f"📁 Log File: {os.path.abspath(log_filename)}")
+        print(f"==================================================\n")
 
-        print(f"🤖 Hephaestus: {content[:100]}...")
+        history = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": task}
+        ]
 
-        # =========================================================
-        # 🟢 1. MIDDLEWARE: CAPTURE & VALIDATE CODE BLOCK (SMART & SAFE)
-        # =========================================================
 
-        all_raw_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
-        # กรอง JSON Action ออก
-        valid_code_blocks = [b for b in all_raw_blocks if '"action":' not in b]
+        persistent_code_block = None
 
-        new_code_block = None
-
-        if not valid_code_blocks:
-            # Case 0: ไม่เจอ Code เลย
-            pass
-
-        elif len(valid_code_blocks) == 1:
-            # Case 1: เจออันเดียว -> จบข่าว ใช้เลย
-            new_code_block = valid_code_blocks[0]
-
-        else:
-            # Case 2: เจอหลายอัน -> ต้องระวัง! ⚠️
-            # เรียงลำดับจาก ยาวมาก -> สั้นน้อย
-            sorted_blocks = sorted(valid_code_blocks, key=len, reverse=True)
-            big_block = sorted_blocks[0]
-            second_block = sorted_blocks[1]
-
-            # 📏 DOMINANCE CHECK (กฎ 20%)
-            # ถ้าก้อนรอง (Second) มีขนาดใหญ่เกิน 20% ของก้อนหลัก (Main)
-            # แปลว่ามันน่าจะเป็น "ไฟล์แยก" ไม่ใช่แค่ "Snippet ประกอบ"
-            if len(second_block) > len(big_block) * 0.2:
-                print(
-                    f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks ({len(big_block)} chars vs {len(second_block)} chars).")
-                error_msg = (
-                    "🛑 SYSTEM ERROR: Multiple Files Detected!\n"
-                    "I found two large code blocks. I cannot determine which one to write.\n"
-                    "👉 RULE: Send ONE file per message. Wait for the result before sending the next one."
-                )
-                history.append({"role": "assistant", "content": content})
-                history.append({"role": "user", "content": error_msg})
-                continue
-
-            # ถ้าผ่าน (ก้อนรองเล็กจิ๋ว) -> สรุปว่าเป็น Docs ที่มี Snippet -> เลือกก้อนใหญ่สุด
-            new_code_block = big_block
-
-        # -------------------------------------------------------------
-        # Update Memory
-        if new_code_block:
-            persistent_code_block = new_code_block.strip()
-            print(f"📦 Captured NEW code block ({len(persistent_code_block)} chars)")
-            print(f"✨ NEW memory captured.")
-        elif persistent_code_block:
-            print("♻️  No new code found, using existing memory.")
-        else:
-            print("⚠️  No code in memory yet.")
-
-        # 🟢 2. PARSE TOOLS
-        content_cleaned = sanitize_json_input(content)
-        tool_calls = _extract_all_jsons(content_cleaned)
-
-        # 🟢 3. SMART RECOVERY
-        if not tool_calls and ('"action":' in content or "```json" in content):
-            print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
-            action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
-            path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
-
-            if action_match and path_match and persistent_code_block:
-                found_action = action_match.group(1)
-                found_path = path_match.group(1)
-                if found_action in ["write_file", "append_file"]:
-                    print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path}")
-                    tool_calls = [
-                        {"action": found_action, "args": {"file_path": found_path, "content": persistent_code_block}}]
-
-            if not tool_calls:
-                print("❌ Recovery Failed. Sending Error Message.")
-                history.append({"role": "assistant", "content": content})
-                history.append({"role": "user",
-                                "content": "❌ SYSTEM ERROR: JSON Validation Failed! Please use the 'LAST_CODE_BLOCK' pattern."})
-                continue
-
-        # 🟢 4. EXECUTION LOOP
-        seen_tools = set()
-        unique_tools = []
-        for tool in tool_calls:
-            tool_str = json.dumps(tool, sort_keys=True)
-            if tool_str not in seen_tools:
-                seen_tools.add(tool_str)
-                unique_tools.append(tool)
-
-        step_outputs = []
-        task_finished = False
-
-        for tool_call in unique_tools:
-            action = tool_call.get("action")
-            args = tool_call.get("args", {})
-
-            # --- Task Complete Logic (Verified & Restored) ---
-            if action == "task_complete":
-                task_mode = args.get("mode", "code").lower()
-                validation_error = None
-                workspace = settings.AGENT_WORKSPACE
-
-                # 1. Check Uncommitted Changes
-                status = run_git_cmd("git status --porcelain", cwd=workspace)
-                if status.strip():
-                    validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
-
-                # 2. Verify Work (Mode Based) - ✅ RESTORED
-                if not validation_error:
-                    current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
-                    if "HEAD detached" in current_branch or not current_branch:
-                        current_branch = "HEAD"
-
-                    is_main = current_branch in ["main", "master"]
-                    source_files = []
-                    config_files = []
-                    test_files = []
-                    has_changes = False
-
-                    if not is_main:
-                        diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
-                        changed_files = diff_output.strip().splitlines()
-                        if changed_files:
-                            has_changes = True
-                            for f in changed_files:
-                                f = f.strip()
-                                if not f: continue
-                                if f.startswith("src/") or f.startswith("app/") or (
-                                        f.endswith(".py") and "test" not in f):
-                                    source_files.append(f)
-                                elif f.startswith("tests/") or "test" in f:
-                                    test_files.append(f)
-                                else:
-                                    config_files.append(f)
-                    else:
-                        has_changes = False
-
-                    # === CASE A: Code Mode ===
-                    if task_mode == "code":
-                        if not has_changes:
-                            validation_error = (
-                                "❌ REJECTED: No file changes detected compared to main branch.\n"
-                                "If you made changes, did you forget to 'git push'?\n"
-                                "If this is just analysis, please use mode='analysis'."
-                            )
-                        elif not source_files and (config_files or test_files):
-                            validation_error = (
-                                "❌ REJECTED: No SOURCE CODE changes detected!\n"
-                                f"   - Config/Docs changed: {config_files}\n"
-                                f"   - Tests changed: {test_files}\n"
-                                "⚠️ But NO changes in 'src/' or logic files found.\n"
-                                "Feature implementation MUST include source code changes."
-                            )
-                        elif not is_main and not validation_error:
-                            pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
-                            if "no open pull requests" in pr_check or not pr_check.strip():
-                                validation_error = "❌ REJECTED: Code committed but NO Pull Request (PR) found. Please create a PR first."
-
-                    # === CASE B: Analysis Mode ===
-                    elif task_mode == "analysis":
-                        if has_changes:
-                            print(
-                                f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
-
-                if validation_error:
-                    print(f"🚫 {validation_error}")
-                    step_outputs.append(validation_error)
-                    break
+        for step in range(max_steps):
+            print(f"\n🔄 Thinking (Step {step + 1})...")
+            try:
+                response = query_qwen(history)
+                if isinstance(response, dict):
+                    content = response.get('message', {}).get('content', '') or response.get('content', '')
                 else:
-                    task_finished = True
-                    step_outputs.append(f"Task Completed: {args.get('summary', 'Done')}")
-                    break
+                    content = str(response)
+            except Exception as e:
+                print(f"❌ Error querying LLM: {e}")
+                return
 
-            if action not in TOOLS:
-                step_outputs.append(f"❌ Error: Tool '{action}' not found.")
-                continue
-
-            # =========================================================
-            # 🟢 5. MIDDLEWARE INJECTION (Replace LAST_CODE_BLOCK)
-            # =========================================================
-            if "LAST_CODE_BLOCK" in str(args):
-                if not persistent_code_block:
-                    print("🛡️ INTERCEPTED: Agent tried to use LAST_CODE_BLOCK but memory is empty.")
-                    error_msg = "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but forgot to write the Markdown code block first."
-                    step_outputs.append(error_msg)
-                    break
-
-                if action == "edit_file" and args.get("replacement_text") == "LAST_CODE_BLOCK":
-                    args["replacement_text"] = persistent_code_block
-                    print("✏️ Auto-attached replacement text from memory.")
-                elif action in ["write_file", "append_file"] and args.get("content") == "LAST_CODE_BLOCK":
-                    args["content"] = persistent_code_block
-                    print(f"📝 Auto-attached content to {args.get('file_path')} from memory.")
+            print(f"🤖 Hephaestus: {content[:100]}...")
 
             # =========================================================
-            # 🧹 6. MARKDOWN STRIPPER
+            # 🟢 1. MIDDLEWARE: CAPTURE & VALIDATE CODE BLOCK (SMART & SAFE)
             # =========================================================
-            for key in ["content", "replacement_text"]:
-                if key in args and isinstance(args[key], str) and "```" in args[key]:
-                    args[key] = re.sub(r"^```[a-zA-Z0-9]*\n", "", args[key])
-                    args[key] = re.sub(r"\n```$", "", args[key]).strip()
 
-            # =========================================================
-            # 🛡️ 7. GUARDRAILS & SAFETY LOCKS (✅ RESTORED & VERIFIED)
-            # =========================================================
-            target_file = args.get("file_path", "")
+            all_raw_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
+            # กรอง JSON Action ออก
+            valid_code_blocks = [b for b in all_raw_blocks if '"action":' not in b]
 
-            # --- 7.1 Filename Guardrail ---
-            if action in ["write_file", "edit_file", "append_file"]:
-                clean_target = target_file.replace("\\", "/")
-                if clean_target.startswith("docs/") and clean_target != "docs/specs.md":
-                    print(f"🚫 BLOCKED: Wrong spec filename '{clean_target}'")
-                    error_msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'. Rename it."
-                    step_outputs.append(error_msg)
+            new_code_block = None
+
+            if not valid_code_blocks:
+                # Case 0: ไม่เจอ Code เลย
+                pass
+
+            elif len(valid_code_blocks) == 1:
+                # Case 1: เจออันเดียว -> จบข่าว ใช้เลย
+                new_code_block = valid_code_blocks[0]
+
+            else:
+                # Case 2: เจอหลายอัน -> ต้องระวัง! ⚠️
+                # เรียงลำดับจาก ยาวมาก -> สั้นน้อย
+                sorted_blocks = sorted(valid_code_blocks, key=len, reverse=True)
+                big_block = sorted_blocks[0]
+                second_block = sorted_blocks[1]
+
+                # 📏 DOMINANCE CHECK (กฎ 20%)
+                # ถ้าก้อนรอง (Second) มีขนาดใหญ่เกิน 20% ของก้อนหลัก (Main)
+                # แปลว่ามันน่าจะเป็น "ไฟล์แยก" ไม่ใช่แค่ "Snippet ประกอบ"
+                if len(second_block) > len(big_block) * 0.2:
+                    print(
+                        f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks ({len(big_block)} chars vs {len(second_block)} chars).")
+                    error_msg = (
+                        "🛑 SYSTEM ERROR: Multiple Files Detected!\n"
+                        "I found two large code blocks. I cannot determine which one to write.\n"
+                        "👉 RULE: Send ONE file per message. Wait for the result before sending the next one."
+                    )
                     history.append({"role": "assistant", "content": content})
                     history.append({"role": "user", "content": error_msg})
-                    break
+                    continue
 
-            # --- 7.2 Spec Guardrail ---
-            if action in ["write_file", "edit_file", "append_file"]:
-                if target_file.startswith("src/") or target_file.startswith("tests/"):
-                    spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
-                    if not os.path.exists(spec_path):
-                        msg = "❌ POLICY VIOLATION: You MUST write 'docs/specs.md' before modifying code."
-                        print(msg)
-                        step_outputs.append(msg)
-                        history.append({"role": "assistant", "content": content})
-                        history.append({"role": "user", "content": msg})
+                # ถ้าผ่าน (ก้อนรองเล็กจิ๋ว) -> สรุปว่าเป็น Docs ที่มี Snippet -> เลือกก้อนใหญ่สุด
+                new_code_block = big_block
+
+            # -------------------------------------------------------------
+            # Update Memory
+            if new_code_block:
+                persistent_code_block = new_code_block.strip()
+                print(f"📦 Captured NEW code block ({len(persistent_code_block)} chars)")
+                print(f"✨ NEW memory captured.")
+            elif persistent_code_block:
+                print("♻️  No new code found, using existing memory.")
+            else:
+                print("⚠️  No code in memory yet.")
+
+            # 🟢 2. PARSE TOOLS
+            content_cleaned = sanitize_json_input(content)
+            tool_calls = _extract_all_jsons(content_cleaned)
+
+            # 🟢 3. SMART RECOVERY
+            if not tool_calls and ('"action":' in content or "```json" in content):
+                print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
+                action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
+                path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
+
+                if action_match and path_match and persistent_code_block:
+                    found_action = action_match.group(1)
+                    found_path = path_match.group(1)
+                    if found_action in ["write_file", "append_file"]:
+                        print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path}")
+                        tool_calls = [
+                            {"action": found_action, "args": {"file_path": found_path, "content": persistent_code_block}}]
+
+                if not tool_calls:
+                    print("❌ Recovery Failed. Sending Error Message.")
+                    history.append({"role": "assistant", "content": content})
+                    history.append({"role": "user",
+                                    "content": "❌ SYSTEM ERROR: JSON Validation Failed! Please use the 'LAST_CODE_BLOCK' pattern."})
+                    continue
+
+            # 🟢 4. EXECUTION LOOP
+            seen_tools = set()
+            unique_tools = []
+            for tool in tool_calls:
+                tool_str = json.dumps(tool, sort_keys=True)
+                if tool_str not in seen_tools:
+                    seen_tools.add(tool_str)
+                    unique_tools.append(tool)
+
+            step_outputs = []
+            task_finished = False
+
+            for tool_call in unique_tools:
+                action = tool_call.get("action")
+                args = tool_call.get("args", {})
+
+                # --- Task Complete Logic (Verified & Restored) ---
+                if action == "task_complete":
+                    task_mode = args.get("mode", "code").lower()
+                    validation_error = None
+                    workspace = settings.AGENT_WORKSPACE
+
+                    # 1. Check Uncommitted Changes
+                    status = run_git_cmd("git status --porcelain", cwd=workspace)
+                    if status.strip():
+                        validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
+
+                    # 2. Verify Work (Mode Based) - ✅ RESTORED
+                    if not validation_error:
+                        current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
+                        if "HEAD detached" in current_branch or not current_branch:
+                            current_branch = "HEAD"
+
+                        is_main = current_branch in ["main", "master"]
+                        source_files = []
+                        config_files = []
+                        test_files = []
+                        has_changes = False
+
+                        if not is_main:
+                            diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
+                            changed_files = diff_output.strip().splitlines()
+                            if changed_files:
+                                has_changes = True
+                                for f in changed_files:
+                                    f = f.strip()
+                                    if not f: continue
+                                    if f.startswith("src/") or f.startswith("app/") or (
+                                            f.endswith(".py") and "test" not in f):
+                                        source_files.append(f)
+                                    elif f.startswith("tests/") or "test" in f:
+                                        test_files.append(f)
+                                    else:
+                                        config_files.append(f)
+                        else:
+                            has_changes = False
+
+                        # === CASE A: Code Mode ===
+                        if task_mode == "code":
+                            if not has_changes:
+                                validation_error = (
+                                    "❌ REJECTED: No file changes detected compared to main branch.\n"
+                                    "If you made changes, did you forget to 'git push'?\n"
+                                    "If this is just analysis, please use mode='analysis'."
+                                )
+                            elif not source_files and (config_files or test_files):
+                                validation_error = (
+                                    "❌ REJECTED: No SOURCE CODE changes detected!\n"
+                                    f"   - Config/Docs changed: {config_files}\n"
+                                    f"   - Tests changed: {test_files}\n"
+                                    "⚠️ But NO changes in 'src/' or logic files found.\n"
+                                    "Feature implementation MUST include source code changes."
+                                )
+                            elif not is_main and not validation_error:
+                                pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
+                                if "no open pull requests" in pr_check or not pr_check.strip():
+                                    validation_error = "❌ REJECTED: Code committed but NO Pull Request (PR) found. Please create a PR first."
+
+                        # === CASE B: Analysis Mode ===
+                        elif task_mode == "analysis":
+                            if has_changes:
+                                print(
+                                    f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
+
+                    if validation_error:
+                        print(f"🚫 {validation_error}")
+                        step_outputs.append(validation_error)
+                        break
+                    else:
+                        task_finished = True
+                        step_outputs.append(f"Task Completed: {args.get('summary', 'Done')}")
                         break
 
-            # --- 7.3 Safety Lock (Overwrite Protection) ---
-            if action == "write_file":
-                full_path = os.path.join(settings.AGENT_WORKSPACE, target_file)
-                if os.path.exists(full_path) and target_file.endswith(".py"):
-                    try:
-                        with open(full_path, 'r', encoding='utf-8') as f:
-                            old_content = f.read()
-                        new_content = args.get("content", "")
-                        if len(new_content) < len(old_content) * 0.5:
-                            msg = f"🚫 SAFETY BLOCK: Preventing accidental large delete on {target_file}."
+                if action not in TOOLS:
+                    step_outputs.append(f"❌ Error: Tool '{action}' not found.")
+                    continue
+
+                # =========================================================
+                # 🟢 5. MIDDLEWARE INJECTION (Replace LAST_CODE_BLOCK)
+                # =========================================================
+                if "LAST_CODE_BLOCK" in str(args):
+                    if not persistent_code_block:
+                        print("🛡️ INTERCEPTED: Agent tried to use LAST_CODE_BLOCK but memory is empty.")
+                        error_msg = "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but forgot to write the Markdown code block first."
+                        step_outputs.append(error_msg)
+                        break
+
+                    if action == "edit_file" and args.get("replacement_text") == "LAST_CODE_BLOCK":
+                        args["replacement_text"] = persistent_code_block
+                        print("✏️ Auto-attached replacement text from memory.")
+                    elif action in ["write_file", "append_file"] and args.get("content") == "LAST_CODE_BLOCK":
+                        args["content"] = persistent_code_block
+                        print(f"📝 Auto-attached content to {args.get('file_path')} from memory.")
+
+                # =========================================================
+                # 🧹 6. MARKDOWN STRIPPER
+                # =========================================================
+                for key in ["content", "replacement_text"]:
+                    if key in args and isinstance(args[key], str) and "```" in args[key]:
+                        args[key] = re.sub(r"^```[a-zA-Z0-9]*\n", "", args[key])
+                        args[key] = re.sub(r"\n```$", "", args[key]).strip()
+
+                # =========================================================
+                # 🛡️ 7. GUARDRAILS & SAFETY LOCKS (✅ RESTORED & VERIFIED)
+                # =========================================================
+                target_file = args.get("file_path", "")
+
+                # --- 7.1 Filename Guardrail ---
+                if action in ["write_file", "edit_file", "append_file"]:
+                    clean_target = target_file.replace("\\", "/")
+                    if clean_target.startswith("docs/") and clean_target != "docs/specs.md":
+                        print(f"🚫 BLOCKED: Wrong spec filename '{clean_target}'")
+                        error_msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'. Rename it."
+                        step_outputs.append(error_msg)
+                        history.append({"role": "assistant", "content": content})
+                        history.append({"role": "user", "content": error_msg})
+                        break
+
+                # --- 7.2 Spec Guardrail ---
+                if action in ["write_file", "edit_file", "append_file"]:
+                    if target_file.startswith("src/") or target_file.startswith("tests/"):
+                        spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
+                        if not os.path.exists(spec_path):
+                            msg = "❌ POLICY VIOLATION: You MUST write 'docs/specs.md' before modifying code."
                             print(msg)
                             step_outputs.append(msg)
                             history.append({"role": "assistant", "content": content})
                             history.append({"role": "user", "content": msg})
                             break
-                    except Exception as e:
-                        print(f"⚠️ Safety check warning: {e}")
 
-            # =========================================================
-            # 🚀 8. EXECUTE
-            # =========================================================
-            # ใน loop ก่อน execute_tool_dynamic
-            if action == "run_command":
-                cmd = args.get("command", "")
-                # ถ้าสั่ง up แต่ลืม -d ให้เติมให้เองเลย
-                if "docker-compose up" in cmd and "-d" not in cmd:
-                    print("🔧 Auto-fixing: Added '-d' to docker-compose up")
-                    args["command"] = cmd.replace("docker-compose up", "docker-compose up -d")
+                # --- 7.3 Safety Lock (Overwrite Protection) ---
+                if action == "write_file":
+                    full_path = os.path.join(settings.AGENT_WORKSPACE, target_file)
+                    if os.path.exists(full_path) and target_file.endswith(".py"):
+                        try:
+                            with open(full_path, 'r', encoding='utf-8') as f:
+                                old_content = f.read()
+                            new_content = args.get("content", "")
+                            if len(new_content) < len(old_content) * 0.5:
+                                msg = f"🚫 SAFETY BLOCK: Preventing accidental large delete on {target_file}."
+                                print(msg)
+                                step_outputs.append(msg)
+                                history.append({"role": "assistant", "content": content})
+                                history.append({"role": "user", "content": msg})
+                                break
+                        except Exception as e:
+                            print(f"⚠️ Safety check warning: {e}")
 
-            print(f"🔧 Executing: {action}")
-            res_data = execute_tool_dynamic(action, args)
-            result_for_ai = res_data["output"]
+                # =========================================================
+                # 🚀 8. EXECUTE
+                # =========================================================
+                # ใน loop ก่อน execute_tool_dynamic
+                if action == "run_command":
+                    cmd = args.get("command", "")
+                    # ถ้าสั่ง up แต่ลืม -d ให้เติมให้เองเลย
+                    if "docker-compose up" in cmd and "-d" not in cmd:
+                        print("🔧 Auto-fixing: Added '-d' to docker-compose up")
+                        args["command"] = cmd.replace("docker-compose up", "docker-compose up -d")
 
-            if action in ["write_file", "append_file", "edit_file"] and res_data["success"]:
-                persistent_code_block = None
-                print("DEBUG: Memory flushed.", file=sys.stderr)
+                print(f"🔧 Executing: {action}")
+                res_data = execute_tool_dynamic(action, args)
+                result_for_ai = res_data["output"]
 
-            # --- Batching Detector Logic (Restored) ---
-            if len(unique_tools) > 1:
-                print(f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
-                result_for_ai += (
-                    f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
-                    f"You sent {len(unique_tools)} actions at once. "
-                    f"I executed ONLY the first one ('{action}'). "
-                    f"The other {len(unique_tools) - 1} actions were IGNORED. "
-                    f"Wait for this result before sending the next command."
-                )
+                if action in ["write_file", "append_file", "edit_file"] and res_data["success"]:
+                    persistent_code_block = None
+                    print("DEBUG: Memory flushed.", file=sys.stderr)
 
-            # =========================================================
-            # 🎨 SMART LOGGING DISPLAY (แก้ตรงนี้!)
-            # =========================================================
+                # --- Batching Detector Logic (Restored) ---
+                if len(unique_tools) > 1:
+                    print(f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
+                    result_for_ai += (
+                        f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
+                        f"You sent {len(unique_tools)} actions at once. "
+                        f"I executed ONLY the first one ('{action}'). "
+                        f"The other {len(unique_tools) - 1} actions were IGNORED. "
+                        f"Wait for this result before sending the next command."
+                    )
 
-            # ถ้าเป็นการรันคำสั่ง (เช่น pytest) ให้โชว์ยาวๆ หน่อย (Max 2000 chars)
-            if action == "run_command":
-                log_display = result_for_ai
-                if len(log_display) > 2000:
-                    log_display = log_display[:2000] + "\n... [Output Truncated] ..."
-                print(f"📄 Result:\n{log_display}")
+                # =========================================================
+                # 🎨 SMART LOGGING DISPLAY (แก้ตรงนี้!)
+                # =========================================================
 
-            # ถ้าเป็นการเขียนไฟล์ หรืออื่นๆ ให้ตัดสั้น (Max 300 chars)
-            else:
-                display = f"✅ File operation success: {target_file}" if "success" in str(
-                    result_for_ai).lower() and action.startswith("write") else result_for_ai
-                print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
+                # ถ้าเป็นการรันคำสั่ง (เช่น pytest) ให้โชว์ยาวๆ หน่อย (Max 2000 chars)
+                if action == "run_command":
+                    log_display = result_for_ai
+                    if len(log_display) > 2000:
+                        log_display = log_display[:2000] + "\n... [Output Truncated] ..."
+                    print(f"📄 Result:\n{log_display}")
 
-            # บันทึกของจริงลง History (ส่งให้ AI ดู)
-            step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
-            break
+                # ถ้าเป็นการเขียนไฟล์ หรืออื่นๆ ให้ตัดสั้น (Max 300 chars)
+                else:
+                    display = f"✅ File operation success: {target_file}" if "success" in str(
+                        result_for_ai).lower() and action.startswith("write") else result_for_ai
+                    print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
+
+                # บันทึกของจริงลง History (ส่งให้ AI ดู)
+                step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
+                break
 
 
-        if task_finished:
-            print(f"\n✅ BUILD COMPLETE.")
-            return
+            if task_finished:
+                print(f"\n✅ BUILD COMPLETE.")
+                return
 
-        history.append({"role": "assistant", "content": content})
-        history.append({"role": "user", "content": "\n".join(step_outputs)})
+            history.append({"role": "assistant", "content": content})
+            history.append({"role": "user", "content": "\n".join(step_outputs)})
 
-    print("❌ FAILED: Max steps reached.")
+        print("❌ FAILED: Max steps reached.")
 
+
+    finally:
+
+        # ✅ ใช้ locals() เช็คก่อนว่าตัวแปรมีอยู่จริงไหม กันโปรแกรมพังซ้ำซ้อน
+
+        if 'original_stdout' in locals():
+            sys.stdout = original_stdout
+
+        if 'dual_logger' in locals():
+            dual_logger.close()
+
+            print(f"🔒 Log file closed: {log_filename}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
