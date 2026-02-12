@@ -15,7 +15,7 @@ def allowed_gai_family():
 connection.allowed_gai_family = allowed_gai_family
 
 # 🎯 เป้าหมาย (จาก Curl ของคุณ)
-url = "https://y61p8mprv4smje-11434.proxy.runpod.net/api/chat"
+url = "https://ku5rp3pvihdvb3-11434.proxy.runpod.net/api/chat"
 
 # 🎭 หน้ากากขั้นเทพ (เอามาจาก Curl ของคุณเป๊ะๆ)
 headers = {

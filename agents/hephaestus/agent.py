@@ -5,249 +5,91 @@ import re
 import os
 import subprocess
 import ast
-from typing import Dict, Any, List
-import core.network_fix
-import asyncio
+import time
+from typing import Dict, Any, List, Tuple
+try:
+    import core.network_fix
+except ImportError:
+    pass
+
 # ✅ Core Configuration & LLM
 from core.config import settings
 from core.llm_client import query_qwen
 
-# ✅ Core Tools (Updated)
-from core.tools.jira_ops import get_jira_issue  # ใช้ตัวใหม่ที่ return dict
+# ✅ Core Tools
+from core.tools.jira_ops import get_jira_issue
 from core.tools.file_ops import read_file, write_file, append_file, list_files, edit_file
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
-from core.tools.git_ops import run_git_cmd  # ใช้สำหรับ validation ภายใน
+from core.tools.git_ops import run_git_cmd
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Hephaestus] %(message)s')
 logger = logging.getLogger("Hephaestus")
 
-def sanitize_json_input(raw_text):
-    """
-    Professional Fix: ทำความสะอาด JSON string ที่ Model อาจจะเขียนผิดมา
-    โดยเฉพาะกรณีใช้ Triple Quotes  แทนที่จะใช้ \n
-    """
-    # 1. ลบ Markdown Code Blocks (```json ... ```) ถ้ามี
-    clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
-    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
-    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
-
-    # 2. แก้ปัญหา Triple Quotes  ที่
-    # Logic: หา string ที่อยู่ระหว่าง """ ... """ แล้วแปลง newlines เป็น \n ให้หมด
-
-    def fix_triple_quotes(match):
-        content = match.group(1)
-        # Escape backslashes first
-        content = content.replace('\\', '\\\\')
-        # Escape double quotes
-        content = content.replace('"', '\\"')
-        # Replace newlines with \n
-        content = content.replace('\n', '\\n')
-        return f'"{content}"'
-
-    # Regex ค้นหา """...""" (แบบ non-greedy)
-    clean_text = re.sub(r'"""(.*?)"""', fix_triple_quotes, clean_text, flags=re.DOTALL)
-
-    return clean_text.strip()
+# ==============================================================================
+# 🧠 SYSTEM PROMPT (FULL ORIGINAL + MD FIX)
+# ==============================================================================
+# ใช้ตัวแปรนี้แทน Backticks เพื่อไม่ให้ Markdown ในแชทพัง
+MD_QUOTE = "```"
 
 # ==============================================================================
-# 🛠️ HEPHAESTUS SPECIFIC TOOLS (Sandbox Commanders)
+# 🧠 SYSTEM PROMPT (FULL ORIGINAL + MD FIX + MIDDLEWARE PROTOCOL)
 # ==============================================================================
+MD_QUOTE = "```"
 
-def run_sandbox_command(command: str, timeout: int = 300) -> str:
-    """
-    Executes a shell command inside the Agent's Workspace.
-    Handles venv activation and UTF-8 encoding automatically.
-    """
-    workspace = settings.AGENT_WORKSPACE
-
-    if not os.path.exists(workspace):
-        return f"❌ Error: Workspace not found. Did you run 'git_setup_workspace'?"
-
-    logger.info(f"⚡ Executing in Sandbox: {command}")
-
-    try:
-        env = os.environ.copy()
-        # เพิ่ม Workspace เข้า PYTHONPATH
-        env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
-
-        # 🔧 Environment Fixes
-        env["PYTHONUTF8"] = "1"  # บังคับ UTF-8 (แก้ปัญหา Windows)
-        env["PIP_NO_INPUT"] = "1"  # ห้าม pip ถาม
-
-        # =========================================================
-        # 🛡️ VENV AUTO-LOADER (The Hero Logic)
-        # =========================================================
-        venv_path = os.path.join(workspace, ".venv")
-        if os.path.exists(venv_path):
-            if os.name == 'nt':  # Windows
-                venv_scripts = os.path.join(venv_path, "Scripts")
-            else:  # Linux/Mac
-                venv_scripts = os.path.join(venv_path, "bin")
-
-            if os.path.exists(venv_scripts):
-                # ยัดเข้า PATH เป็นลำดับแรก เพื่อให้เรียก python/pip ของ venv ก่อนเสมอ
-                env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
-                env["VIRTUAL_ENV"] = venv_path
-                # logger.info(f"🔌 Activated venv at: {venv_path}")
-
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            env=env,
-            input="",
-            timeout=timeout
-        )
-
-        output = result.stdout.strip()
-        error = result.stderr.strip()
-
-        if result.returncode == 0:
-            return f"✅ Command Success:\n{output}"
-        else:
-            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
-
-    except subprocess.TimeoutExpired:
-        return f"⏰ Command Timeout! (Over {timeout}s). Process killed."
-
-    except Exception as e:
-        return f"❌ Execution Error: {e}"
-
-
-def install_package(package_name: str) -> str:
-    """Installs a Python package using the sandbox environment."""
-    if any(char in package_name for char in [";", "&", "|", ">"]):
-        return "❌ Error: Invalid package name."
-    return run_sandbox_command(f"pip install {package_name}")
-
-
-# ==============================================================================
-# 🧩 TOOLS REGISTRY
-# ==============================================================================
-TOOLS = {
-    "get_jira_issue": get_jira_issue,
-    "list_files": list_files,
-    "read_file": read_file,
-    "edit_file": edit_file,
-    "git_setup_workspace": git_setup_workspace,
-    "git_commit": git_commit,
-    "git_push": git_push,
-    "git_pull": git_pull,
-    "create_pr": create_pr,
-    "write_file": write_file,
-    "append_file": append_file,
-    "run_command": run_sandbox_command,
-    "install_package": install_package
-}
-
-import sys
-from typing import Dict, Any, Tuple
-
-# 1. นิยาม Schema (กฎเหล็ก) ของแต่ละ Tool
-TOOL_SCHEMAS = {
-    "edit_file": {
-        "required": ["target_text", "replacement_text"],
-        "file_path": True
-    },
-    "write_file": {
-        "required": ["content"],
-        "file_path": True
-    },
-    "append_file": {
-        "required": ["content"],
-        "file_path": True
-    },
-    "read_file": {
-        "required": [],
-        "file_path": True
-    },
-    # Tool อื่นๆ ใส่เพิ่มตรงนี้...
-}
-
-
-def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    # 0. เช็คว่ารู้จัก Tool นี้ไหม
-    if tool_name not in TOOLS:
-        return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
-
-    # 🛡️ VALIDATION LAYER: ตรวจสอบ Argument ก่อนรันจริง
-    if tool_name in TOOL_SCHEMAS:
-        schema = TOOL_SCHEMAS[tool_name]
-
-        # สร้าง Set ของ Key ที่ถูกต้อง
-        valid_keys = set(schema["required"])
-        if schema.get("file_path"):
-            valid_keys.add("file_path")
-
-        received_keys = set(args.keys())
-        unknown_keys = received_keys - valid_keys
-
-        # 1. เช็ค Key ผี (เกินมา)
-        if unknown_keys:
-            error_msg = (
-                f"[ERROR] Invalid arguments for '{tool_name}'.\n"
-                f"❌ Unknown arguments: {list(unknown_keys)}\n"
-                f"✅ Expected arguments: {list(valid_keys)}\n"
-                f"👉 Please CORRECT your JSON and try again."
-            )
-            # ⚠️ ต้อง return Dict เสมอ!
-            return {"success": False, "output": error_msg}
-
-        # 2. เช็ค Key ขาด (หายไป)
-        missing_keys = [k for k in schema["required"] if k not in args]
-        if missing_keys:
-            return {"success": False, "output": f"[ERROR] Missing required arguments for '{tool_name}': {missing_keys}"}
-
-        # 3. เช็ค file_path (ถ้าจำเป็น)
-        if schema.get("file_path") and "file_path" not in args:
-            return {"success": False, "output": f"[ERROR] Missing required arguments for '{tool_name}': ['file_path']"}
-
-    # 🚀 EXECUTION LAYER: รันของจริง
-    try:
-        func = TOOLS[tool_name]
-
-        # 1. รันฟังก์ชัน
-        raw_result = str(func(**args))
-
-        # 2. ตรวจสอบ "เจตนา" ของผลลัพธ์ (Success Detection)
-        is_success = "✅" in raw_result or "SUCCESS" in raw_result.upper()
-
-        # 3. 🧹 Cleaning: ลบ Emoji เพื่อความปลอดภัยของ MCP บน Windows
-        clean_output = raw_result.replace("✅", "[SUCCESS]").replace("❌", "[ERROR]")
-
-        # 4. ส่งกลับ
-        return {
-            "success": is_success,
-            "output": clean_output
-        }
-
-    except Exception as e:
-        # ถ้าพังกลางทาง ให้ถือว่า Error
-        return {
-            "success": False,
-            "output": f"Error executing {tool_name}: {str(e)}"
-        }
-
-# ==============================================================================
-# 🧠 SYSTEM PROMPT (UPDATED)
-# ==============================================================================
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = f"""
 You are "Hephaestus", the Senior Python Developer of Olympus.
 Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), CONTAINERIZE (Compose), and Submit a PR.
 
+*** 🛡️ SAFE CONTENT WRITING PROTOCOL (CRITICAL) ***
+Writing complex code or documentation inside a JSON string is dangerous (escaping issues).
+You MUST use the **"Reference Pattern"** instead:
+
+✅ **STEP 1: Write the Content**
+Write the full file content inside a standard Markdown code block ({MD_QUOTE}python, {MD_QUOTE}markdown, etc.).
+
+✅ **STEP 2: Call the Tool**
+Immediately after the code block, provide the JSON action.
+In the `content` or `replacement_text` argument, use the EXACT placeholder string: `"LAST_CODE_BLOCK"`.
+
+**EXAMPLE:**
+User: "Create main.py"
+Agent:
+Here is the code:
+{MD_QUOTE}python
+def main():
+    print("Hello World")
+{MD_QUOTE}
+{{ "action": "write_file", "args": {{ "file_path": "src/main.py", "content": "LAST_CODE_BLOCK" }} }}
+
+⚠️ RULES:
+The middleware will automatically replace "LAST_CODE_BLOCK" with the content of the code block you just wrote.
+DO NOT try to escape the code yourself inside JSON. Let the system handle it.
+This applies to write_file, append_file, and edit_file.
+
 *** 🛑 SUPER STRICT ATOMICITY (ZERO TOLERANCE) ***
 - You are PROHIBITED from sending multiple JSON actions in one turn.
-- ❌ BAD: `[{"action": "write_file"...}, {"action": "run_command"...}]`
-- ✅ GOOD: `{"action": "write_file"...}` (Wait for result) -> `{"action": "run_command"...}`
+- ❌ BAD: `[{{ "action": "write_file"... }}, {{ "action": "run_command"... }}]`
+- ✅ GOOD: `[{{ "action": "write_file"... }}]` (Wait for result) -> `[{{ "action": "run_command"... }}]`
 - If you batch commands, the second command WILL FAIL and you will lose progress.
 
 *** 🛡️ SPECIALIZED CODING RULES ***
 1. **PYDANTIC VALIDATORS**: When fixing Pydantic validators (`@validator`, `@field_validator`), DO NOT use `edit_file`. Always use `write_file` to redefine the entire Pydantic model class.
+
+*** 🛡️ DATA TRANSMISSION PROTOCOL (THE "REFERENCE PATTERN") ***
+⚠️ CRITICAL RULE: ONE FILE PER TURN
+- You MUST NOT write multiple code blocks for different files in a single response.
+- The middleware ONLY captures the VERY LAST code block.
+- ❌ BAD:
+  {MD_QUOTE}python (code for main.py){MD_QUOTE}
+  {MD_QUOTE}python (code for test.py){MD_QUOTE}
+  {{ "action": "write_file", "args": {{ "file_path": "src/main.py"... }} }}
+  (System will write TEST code into MAIN file -> DISASTER!)
+
+- ✅ GOOD:
+  {MD_QUOTE}python (code for main.py){MD_QUOTE}
+  {{ "action": "write_file", "args": {{ "file_path": "src/main.py"... }} }}
+  (Wait for next turn to write test.py)
 
 *** 👑 CORE PHILOSOPHY & METHODOLOGY ***
 1. **JIRA IS GOD**: The Jira Ticket is the ONLY truth. Ignore legacy code intent; build what Jira asks.
@@ -268,8 +110,8 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 - **KEEP IT SHORT**: When using `write_file`, do not put extremely long markdown content in a single JSON string if possible.
 - **ESCAPE PROPERLY**: Ensure all double quotes (`"`) inside the content are escaped as (`\"`) and newlines as (`\\n`).
 - **NO NESTED JSON BLOCKS**: When writing Markdown that contains JSON examples, DO NOT use triple backticks + json syntax inside the `write_file` content string. It breaks the parser.
-  - ❌ BAD: "... ```json {\\\"key\\\": \\\"val\\\"} ``` ..."
-  - ✅ GOOD: "... Input: { key: val } ..." (Use simplified text representation instead)
+  - ❌ BAD: "... {MD_QUOTE}json {{\\"key\\": \\"val\\"}} {MD_QUOTE} ..."
+  - ✅ GOOD: "... Input: {{ key: val }} ..." (Use simplified text representation instead)
 - **RETRY STRATEGY**: If writing `docs/specs.md` fails, try writing a simpler version without complex formatting.
 
 *** 🧹 CODE ARCHITECTURE RULE ***
@@ -307,8 +149,8 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 4. **SMALL FILES (<100 lines)** 👉 Use `write_file` to rewrite the ENTIRE file (Prevents "layered" code & import errors).
 5. *** 🛠️ TOOL USAGE RULES (CRITICAL) ***
    - **edit_file**:
-     - ❌ WRONG: `{"content": "..."}`
-     - ✅ RIGHT: `{"target_text": "...", "replacement_text": "..."}`
+     - ❌ WRONG: `{{"content": "..."}}`
+     - ✅ RIGHT: `{{"target_text": "...", "replacement_text": "..."}}`
      - Note: `target_text` must be EXACTLY what is currently in the file.
    - **edit_file vs write_file**: 
      - If you need to fix IndentationErrors or complex nested blocks, DO NOT use `edit_file`.
@@ -327,7 +169,7 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
 - **SINGLE LINE ONLY**: `edit_file` is ONLY for small, single-line fixes.
 
 **D. FORMATTING (The "Last Code Block" Rule)**
-- You MUST wrap code in **TRIPLE BACKTICKS** (```python ... ```).
+- You MUST wrap code in **TRIPLE BACKTICKS** ({MD_QUOTE}python ... {MD_QUOTE}).
 - **For `write_file` / `append_file`**: JSON arg `"content": "LAST_CODE_BLOCK"`.
 - **For `edit_file`**: JSON arg `"replacement_text": "LAST_CODE_BLOCK"`.
 - `target_text` must be the EXACT code string to remove. NEVER use "LAST_CODE_BLOCK" in `target_text`.
@@ -346,6 +188,10 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - 🔍 ANALYZE: Use `run_command` to check the EXACT error message or assertion failure.
    - 💡 FIX: Only apply a fix when you understand WHY it failed.
 
+*** 🐳 DOCKER RULES ***
+- ALWAYS use detached mode for services: `docker-compose up -d`.
+- NEVER run blocking commands like `uvicorn` or `python main.py` directly without `&` or background mode. The system waits for exit codes.
+
 *** 💻 TECHNICAL CONSTRAINTS ***
 1. **JSON SYNTAX**: No triple quotes (`\"\"\"`) inside JSON values. Use `\\n`.
 2. **PR HANDLING**: If "PR already exists", assume success. Do NOT use placeholders (`<token>`).
@@ -356,17 +202,104 @@ Your goal is to complete Jira tasks with high quality, Verify with Tests (TDD), 
    - ✅ RIGHT: `git commit -m "My Message"`
 
 RESPONSE FORMAT (JSON ONLY):
-{ "action": "tool_name", "args": { ... } }
+{{ "action": "tool_name", "args": {{ ... }} }}
 """
 
 
 # ==============================================================================
-# 🧩 HELPER: PARSERS
+# 🛠️ SANDBOX TOOLS
 # ==============================================================================
-def extract_code_block(text: str) -> str:
-    matches = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
-    if not matches: return ""
-    return max(matches, key=len).strip()
+def run_sandbox_command(command: str, timeout: int = 300) -> str:
+    workspace = settings.AGENT_WORKSPACE
+    if not os.path.exists(workspace):
+        return f"❌ Error: Workspace not found. Did you run 'git_setup_workspace'?"
+    logger.info(f"⚡ Executing in Sandbox: {command}")
+    try:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONUTF8"] = "1"
+        env["PIP_NO_INPUT"] = "1"
+        venv_path = os.path.join(workspace, ".venv")
+        if os.path.exists(venv_path):
+            if os.name == 'nt':
+                venv_scripts = os.path.join(venv_path, "Scripts")
+            else:
+                venv_scripts = os.path.join(venv_path, "bin")
+            if os.path.exists(venv_scripts):
+                env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
+                env["VIRTUAL_ENV"] = venv_path
+        result = subprocess.run(command, shell=True, cwd=workspace, capture_output=True, text=True, encoding='utf-8',
+                                errors='replace', env=env, input="", timeout=timeout)
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+        if result.returncode == 0:
+            return f"✅ Command Success:\n{output}"
+        else:
+            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
+    except subprocess.TimeoutExpired:
+        return f"⏰ Command Timeout! (Over {timeout}s)."
+    except Exception as e:
+        return f"❌ Execution Error: {e}"
+
+
+def install_package(package_name: str) -> str:
+    if any(char in package_name for char in [";", "&", "|", ">"]): return "❌ Error: Invalid package name."
+    return run_sandbox_command(f"pip install {package_name}")
+
+
+# ==============================================================================
+# 🧩 TOOLS REGISTRY
+# ==============================================================================
+TOOLS = {
+    "get_jira_issue": get_jira_issue, "list_files": list_files, "read_file": read_file,
+    "edit_file": edit_file, "git_setup_workspace": git_setup_workspace, "git_commit": git_commit,
+    "git_push": git_push, "git_pull": git_pull, "create_pr": create_pr, "write_file": write_file,
+    "append_file": append_file, "run_command": run_sandbox_command, "install_package": install_package
+}
+
+TOOL_SCHEMAS = {
+    "edit_file": {"required": ["target_text", "replacement_text"], "file_path": True},
+    "write_file": {"required": ["content"], "file_path": True},
+    "append_file": {"required": ["content"], "file_path": True},
+    "read_file": {"required": [], "file_path": True},
+}
+
+
+def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_name not in TOOLS: return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
+    if tool_name in TOOL_SCHEMAS:
+        schema = TOOL_SCHEMAS[tool_name]
+        valid_keys = set(schema["required"])
+        if schema.get("file_path"): valid_keys.add("file_path")
+        if set(args.keys()) - valid_keys: return {"success": False,
+                                                  "output": f"[ERROR] Invalid arguments. Expected: {list(valid_keys)}"}
+        missing = [k for k in schema["required"] if k not in args]
+        if missing: return {"success": False, "output": f"[ERROR] Missing required arguments: {missing}"}
+    try:
+        func = TOOLS[tool_name]
+        raw_result = str(func(**args))
+        is_success = "✅" in raw_result or "SUCCESS" in raw_result.upper()
+        clean_output = raw_result.replace("✅", "[SUCCESS]").replace("❌", "[ERROR]")
+        return {"success": is_success, "output": clean_output}
+    except Exception as e:
+        return {"success": False, "output": f"Error executing {tool_name}: {str(e)}"}
+
+
+# ==============================================================================
+# 🧩 HELPER FUNCTIONS
+# ==============================================================================
+
+def sanitize_json_input(raw_text):
+    clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
+
+    def fix_triple_quotes(match):
+        content = match.group(1).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+        return f'"{content}"'
+
+    clean_text = re.sub(r'"""(.*?)"""', fix_triple_quotes, clean_text, flags=re.DOTALL)
+    return clean_text.strip()
 
 
 def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
@@ -379,19 +312,15 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
             if not search: break
             start_index = pos + search.start()
             obj, end_index = decoder.raw_decode(text, idx=start_index)
-            if isinstance(obj, dict) and "action" in obj:
-                results.append(obj)
+            if isinstance(obj, dict) and "action" in obj: results.append(obj)
             pos = end_index
         except:
             pos += 1
-
-    # Fallback: ลองใช้ ast.literal_eval เผื่อ AI ตอบเป็น Python Dict string
     if not results:
         try:
             matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
             for match in matches:
                 try:
-                    # Clean up common JSON vs Python issues
                     clean = match.replace("true", "True").replace("false", "False").replace("null", "None")
                     obj = ast.literal_eval(clean)
                     if isinstance(obj, dict) and "action" in obj: results.append(obj)
@@ -399,8 +328,16 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
                     continue
         except:
             pass
-
     return results
+
+
+def extract_code_block(text: str) -> str:
+    all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+    if not all_blocks: return None
+    for block in reversed(all_blocks):
+        if '"action":' in block: continue
+        return block
+    return None
 
 
 # ==============================================================================
@@ -418,8 +355,7 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
         {"role": "user", "content": task}
     ]
 
-    last_code_block = None
-    persistent_code_block = None  # ต้องอยู่เหนือ while step_count < max_steps:
+    persistent_code_block = None
 
     for step in range(max_steps):
         print(f"\n🔄 Thinking (Step {step + 1})...")
@@ -436,110 +372,102 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
         print(f"🤖 Hephaestus: {content[:100]}...")
 
         # =========================================================
-        # 🟢 [แทรกตรงนี้ 1] ดึง Code Block ล่าสุดเตรียมไว้
-        # =========================================================
-        # ดึง Code Block ทั้งหมด
-        all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
-
-        # วนลูปหา Block สุดท้าย ที่ "ไม่ใช่" JSON Action ของเรา
-        found_new_code = False  # รีเซ็ตธงทุกรอบ
-        for block in reversed(all_blocks):
-            if '"action":' in block: continue
-            persistent_code_block = block  # จำลงความจำถาวร
-            found_new_code = True  # ปักธงว่ารอบนี้มีของใหม่
-            print(f"📦 Captured NEW code block ({len(block)} chars)")
-            break
+        # 🟢 1. MIDDLEWARE: CAPTURE & VALIDATE CODE BLOCK (SMART & SAFE)
         # =========================================================
 
-        if found_new_code:
-            print(f"✨ NEW memory captured: {len(persistent_code_block)} characters.")
+        all_raw_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
+        # กรอง JSON Action ออก
+        valid_code_blocks = [b for b in all_raw_blocks if '"action":' not in b]
+
+        new_code_block = None
+
+        if not valid_code_blocks:
+            # Case 0: ไม่เจอ Code เลย
+            pass
+
+        elif len(valid_code_blocks) == 1:
+            # Case 1: เจออันเดียว -> จบข่าว ใช้เลย
+            new_code_block = valid_code_blocks[0]
+
         else:
-            if persistent_code_block:
-                print("♻️  No new code found, using existing memory.")
-            else:
-                print("⚠️  No code in memory yet.")
+            # Case 2: เจอหลายอัน -> ต้องระวัง! ⚠️
+            # เรียงลำดับจาก ยาวมาก -> สั้นน้อย
+            sorted_blocks = sorted(valid_code_blocks, key=len, reverse=True)
+            big_block = sorted_blocks[0]
+            second_block = sorted_blocks[1]
 
-        # ✅ [แก้ตรงนี้] เรียกใช้ฟังก์ชันล้างข้อมูลก่อนส่งไปแกะ JSON
-        content = sanitize_json_input(content)
-
-        tool_calls = _extract_all_jsons(content)
-
-        # =========================================================
-        # 🚑 SMART RECOVERY (ซ่อม JSON อัตโนมัติ)
-        # =========================================================
-        # ถ้า JSON พัง แต่เราเห็นความตั้งใจ (Action + File Path + Code Block)
-        if not tool_calls and ('"action":' in content or "```json" in content):
-            print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
-
-            # 1. พยายามแกะ Action และ File Path ด้วย Regex (ไม่ง้อ JSON Parser)
-            # หาคำว่า "action": "write_file" (รองรับช่องว่าง)
-            action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
-            # หาคำว่า "file_path": "..." (รองรับช่องว่าง)
-            path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
-
-            recovered = False
-
-            # 2. ถ้าข้อมูลครบองค์ประชุม (Action + Path + Markdown Block) -> ลุยเลย!
-            if action_match and path_match and last_code_block:
-                found_action = action_match.group(1)
-                found_path = path_match.group(1)
-
-                # รองรับเฉพาะ write/append (edit_file เสี่ยงไปถ้าแกะ target ไม่ได้)
-                if found_action in ["write_file", "append_file"]:
-                    print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path} using Last Code Block.")
-
-                    # สร้าง Tool Call เทียมขึ้นมา
-                    tool_calls = [{
-                        "action": found_action,
-                        "args": {
-                            "file_path": found_path,
-                            "content": last_code_block  # ยัด Code Block ใส่ปากเลย
-                        }
-                    }]
-                    recovered = True
-
-            # 3. ถ้าซ่อมไม่ได้จริงๆ (เช่น เป็น edit_file หรือหา path ไม่เจอ) -> ค่อยด่าตามเดิม
-            if not recovered:
-                print("❌ Recovery Failed. Sending Error Message.")
-                history.append({"role": "assistant", "content": content})
-
+            # 📏 DOMINANCE CHECK (กฎ 20%)
+            # ถ้าก้อนรอง (Second) มีขนาดใหญ่เกิน 20% ของก้อนหลัก (Main)
+            # แปลว่ามันน่าจะเป็น "ไฟล์แยก" ไม่ใช่แค่ "Snippet ประกอบ"
+            if len(second_block) > len(big_block) * 0.2:
+                print(
+                    f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks ({len(big_block)} chars vs {len(second_block)} chars).")
                 error_msg = (
-                    "❌ SYSTEM ERROR: JSON Validation Failed!\n"
-                    "🛑 STOP putting large text in JSON fields.\n"
-                    "👉 FIX: Write code in a Markdown block first, then send JSON with 'content': 'LAST_CODE_BLOCK'."
+                    "🛑 SYSTEM ERROR: Multiple Files Detected!\n"
+                    "I found two large code blocks. I cannot determine which one to write.\n"
+                    "👉 RULE: Send ONE file per message. Wait for the result before sending the next one."
                 )
-
-                history.append({
-                    "role": "user",
-                    "content": error_msg
-                })
+                history.append({"role": "assistant", "content": content})
+                history.append({"role": "user", "content": error_msg})
                 continue
 
-        # 🟢 [FIX] เพิ่ม Logic กรองคำสั่งซ้ำ (Deduplicate)
-        # แก้ปัญหา AI พูดติดอ่าง (Output JSON เดิมซ้ำ 2 รอบ)
-        unique_tools = []
+            # ถ้าผ่าน (ก้อนรองเล็กจิ๋ว) -> สรุปว่าเป็น Docs ที่มี Snippet -> เลือกก้อนใหญ่สุด
+            new_code_block = big_block
+
+        # -------------------------------------------------------------
+        # Update Memory
+        if new_code_block:
+            persistent_code_block = new_code_block.strip()
+            print(f"📦 Captured NEW code block ({len(persistent_code_block)} chars)")
+            print(f"✨ NEW memory captured.")
+        elif persistent_code_block:
+            print("♻️  No new code found, using existing memory.")
+        else:
+            print("⚠️  No code in memory yet.")
+
+        # 🟢 2. PARSE TOOLS
+        content_cleaned = sanitize_json_input(content)
+        tool_calls = _extract_all_jsons(content_cleaned)
+
+        # 🟢 3. SMART RECOVERY
+        if not tool_calls and ('"action":' in content or "```json" in content):
+            print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
+            action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
+            path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
+
+            if action_match and path_match and persistent_code_block:
+                found_action = action_match.group(1)
+                found_path = path_match.group(1)
+                if found_action in ["write_file", "append_file"]:
+                    print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path}")
+                    tool_calls = [
+                        {"action": found_action, "args": {"file_path": found_path, "content": persistent_code_block}}]
+
+            if not tool_calls:
+                print("❌ Recovery Failed. Sending Error Message.")
+                history.append({"role": "assistant", "content": content})
+                history.append({"role": "user",
+                                "content": "❌ SYSTEM ERROR: JSON Validation Failed! Please use the 'LAST_CODE_BLOCK' pattern."})
+                continue
+
+        # 🟢 4. EXECUTION LOOP
         seen_tools = set()
+        unique_tools = []
         for tool in tool_calls:
-            # แปลง Dict เป็น String เพื่อใช้เช็คใน Set
             tool_str = json.dumps(tool, sort_keys=True)
             if tool_str not in seen_tools:
                 seen_tools.add(tool_str)
                 unique_tools.append(tool)
 
-        tool_calls = unique_tools
-
         step_outputs = []
         task_finished = False
 
-        for tool_call in tool_calls:
+        for tool_call in unique_tools:
             action = tool_call.get("action")
             args = tool_call.get("args", {})
 
-            # ---------------------------------------------------------
-            # 🛡️ TASK COMPLETION CHECK (Safety Gate) - FULL VERSION
-            # ---------------------------------------------------------
+            # --- Task Complete Logic (Verified & Restored) ---
             if action == "task_complete":
-                # รับค่า mode (Default = code)
                 task_mode = args.get("mode", "code").lower()
                 validation_error = None
                 workspace = settings.AGENT_WORKSPACE
@@ -549,12 +477,13 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
                 if status.strip():
                     validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
 
-                # 2. Verify Work (Mode Based)
+                # 2. Verify Work (Mode Based) - ✅ RESTORED
                 if not validation_error:
                     current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
-                    is_main = current_branch in ["main", "master"]
+                    if "HEAD detached" in current_branch or not current_branch:
+                        current_branch = "HEAD"
 
-                    # เตรียมตัวแปร
+                    is_main = current_branch in ["main", "master"]
                     source_files = []
                     config_files = []
                     test_files = []
@@ -563,13 +492,11 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
                     if not is_main:
                         diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
                         changed_files = diff_output.strip().splitlines()
-
                         if changed_files:
                             has_changes = True
                             for f in changed_files:
                                 f = f.strip()
                                 if not f: continue
-                                # แยกประเภทไฟล์
                                 if f.startswith("src/") or f.startswith("app/") or (
                                         f.endswith(".py") and "test" not in f):
                                     source_files.append(f)
@@ -588,7 +515,6 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
                                 "If you made changes, did you forget to 'git push'?\n"
                                 "If this is just analysis, please use mode='analysis'."
                             )
-                        # เช็คว่าแก้แต่ Config หรือเปล่า
                         elif not source_files and (config_files or test_files):
                             validation_error = (
                                 "❌ REJECTED: No SOURCE CODE changes detected!\n"
@@ -597,8 +523,6 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
                                 "⚠️ But NO changes in 'src/' or logic files found.\n"
                                 "Feature implementation MUST include source code changes."
                             )
-
-                        # เช็ค PR
                         elif not is_main and not validation_error:
                             pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
                             if "no open pull requests" in pr_check or not pr_check.strip():
@@ -610,244 +534,145 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
                             print(
                                 f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
 
-                # ---------------------------------------------------------
-                # 🚦 Decide
-                # ---------------------------------------------------------
                 if validation_error:
                     print(f"🚫 {validation_error}")
                     step_outputs.append(validation_error)
                     break
                 else:
                     task_finished = True
-                    result_for_ai = args.get("summary", "Done")
-                    step_outputs.append(f"Task Completed: {result_for_ai}")
+                    step_outputs.append(f"Task Completed: {args.get('summary', 'Done')}")
                     break
 
             if action not in TOOLS:
                 step_outputs.append(f"❌ Error: Tool '{action}' not found.")
                 continue
 
-            # 🛠️ LONG-TERM FIX: ตรวจสอบก่อนรันจริง
+            # =========================================================
+            # 🟢 5. MIDDLEWARE INJECTION (Replace LAST_CODE_BLOCK)
+            # =========================================================
             if "LAST_CODE_BLOCK" in str(args):
-                # ถ้าไม่มี Code Block ในรอบนี้ และไม่มีของเก่าค้างใน Memory
                 if not persistent_code_block:
-                    print("🛡️ INTERCEPTED: Agent forgot code block. Rejecting action.", file=sys.stderr)
+                    print("🛡️ INTERCEPTED: Agent tried to use LAST_CODE_BLOCK but memory is empty.")
+                    error_msg = "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but forgot to write the Markdown code block first."
+                    step_outputs.append(error_msg)
+                    break
 
-                    # สร้าง Error Message แบบสอนงานทันที
-                    rejection_msg = (
-                        "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but you forgot to write the Markdown code block!\n"
-                        "RULE: You MUST write the code block (```python ... ```) in the SAME message as the JSON.\n"
-                        "👉 Please rewrite the code block NOW, then send the JSON again."
-                    )
-
-                    # ยัดใส่ History ให้มันรู้ตัว แล้วข้ามไปรอบถัดไปเลย (ไม่กิน Step ฟรี)
-                    history.append({"role": "assistant", "content": content})
-                    history.append({"role": "user", "content": rejection_msg})
-                    continue  # 🔄 วนกลับไปเริ่ม Loop ใหม่ทันที
+                if action == "edit_file" and args.get("replacement_text") == "LAST_CODE_BLOCK":
+                    args["replacement_text"] = persistent_code_block
+                    print("✏️ Auto-attached replacement text from memory.")
+                elif action in ["write_file", "append_file"] and args.get("content") == "LAST_CODE_BLOCK":
+                    args["content"] = persistent_code_block
+                    print(f"📝 Auto-attached content to {args.get('file_path')} from memory.")
 
             # =========================================================
-            # 🟢 [แก้ตรงนี้ 2] แทนที่ Logic เดิมด้วยอันนี้
+            # 🧹 6. MARKDOWN STRIPPER
             # =========================================================
-            if action == "edit_file":
-                # ให้ AI ส่ง replacement="LAST_CODE_BLOCK" ได้เหมือนกัน
-                if args.get("replacement_text") == "LAST_CODE_BLOCK":
-                    if last_code_block:
-                        args["replacement_text"] = last_code_block
-                        print(f"✏️ Auto-attached replacement text from Markdown block.")
-                    else:
-                        print("⚠️ Warning: edit_file called but no code block found.")
-
-                # =========================================================
-                # 🛡️ 2. เพิ่ม MARKDOWN STRIPPER ให้ edit_file ด้วย! (สำคัญมาก)
-                # =========================================================
-                current_replacement = args.get("replacement_text", "")
-                if "```" in current_replacement:
-                    # ลบบรรทัดแรกที่เป็น ```python
-                    current_replacement = re.sub(r"^```[a-zA-Z0-9]*\n", "", current_replacement)
-                    # ลบบรรทัดสุดท้ายที่เป็น ```
-                    current_replacement = re.sub(r"\n```$", "", current_replacement)
-                    args["replacement_text"] = current_replacement.strip()
-                    # print("🧹 Auto-cleaned Markdown from edit_file replacement text.")
-            elif action in ["write_file", "append_file"]:
-                # เงื่อนไข: ถ้า AI สั่งให้ใช้ Block ล่าสุด หรือส่งมาสั้นผิดปกติ
-                current_content = args.get("content", "")
-                if not current_content or len(current_content) < 10 or current_content == "LAST_CODE_BLOCK":
-
-                    # ✅ เปลี่ยนจาก last_code_block เป็น persistent_code_block
-                    if persistent_code_block:
-                        args["content"] = persistent_code_block
-
-                        # แสดง Log ให้เราเห็นว่าดึงมาจากรอบไหน
-                        origin = "Current Step" if found_new_code else "Previous Step"
-                        print(f"📝 Auto-attached content from {origin} to {args.get('file_path')}")
-
-                    else:
-                        # ❌ กรณีที่หา Code Block ไม่เจอ
-                        print("🚫 ERROR: No Markdown block found in memory.", file=sys.stderr)
-
-                        # --- 🛡️ ANTI-LOOP LOGIC (เพิ่มส่วนนี้) ---
-                        # เช็คว่า Error นี้เพิ่งเกิดขึ้นในรอบที่แล้วหรือเปล่า?
-                        if len(history) >= 2 and "SYNTAX ERROR" in history[-1]["content"]:
-                            # ถ้าซ้ำ 2 รอบติด ให้ด่าแรงขึ้นและบังคับหยุด
-                            critical_error_msg = (
-                                "🛑 SYSTEM HALT: You are stuck in a loop!\n"
-                                "You keep trying to use 'LAST_CODE_BLOCK' without writing the code first.\n"
-                                "RULE: You MUST write the Python code in a Markdown block (```python ... ```) in your message BEFORE sending the JSON."
-                            )
-                            step_outputs.append(critical_error_msg)
-                            history.append({"role": "user", "content": critical_error_msg})
-
-                            # (Option) ถ้าอยากให้หยุดโปรแกรมเลยเมื่อ Loop เกิน 3 รอบ
-                            # raise Exception("AI Stuck in Infinite Loop")
-                        else:
-                            # Error รอบแรก (แจ้งเตือนปกติ)
-                            error_msg = (
-                                "❌ SYNTAX ERROR: I cannot find any code block to write!\n"
-                                "⚠️ You used 'LAST_CODE_BLOCK', but no Markdown code block was found in your current or previous responses.\n"
-                                "👉 STOP APOLOGIZING. JUST WRITE THE CODE BLOCK NOW."
-                            )
-                            step_outputs.append(error_msg)
-                            history.append({"role": "assistant", "content": content})
-                            history.append({"role": "user", "content": error_msg})
-
-                        continue
-
-                # =========================================================
-                # 🛡️ 2. MARKDOWN STRIPPER (เพิ่มใหม่ตรงนี้!)
-                # =========================================================
-                # ถ้าเนื้อหามี ``` ครอบอยู่ ให้แกะออก
-                if "```" in current_content:
-                    # ลบบรรทัดแรกที่เป็น ```yaml, ```python, etc.
-                    current_content = re.sub(r"^```[a-zA-Z0-9]*\n", "", current_content)
-                    # ลบบรรทัดสุดท้ายที่เป็น ```
-                    current_content = re.sub(r"\n```$", "", current_content)
-                    # อัปเดตกลับเข้าไปใน args
-                    args["content"] = current_content.strip()  # strip() เพื่อลบช่องว่างหัวท้าย
-                    # print("🧹 Auto-cleaned Markdown artifacts from file content.")
-            # =========================================================
+            for key in ["content", "replacement_text"]:
+                if key in args and isinstance(args[key], str) and "```" in args[key]:
+                    args[key] = re.sub(r"^```[a-zA-Z0-9]*\n", "", args[key])
+                    args[key] = re.sub(r"\n```$", "", args[key]).strip()
 
             # =========================================================
-            # 🛡️ 1. FILENAME GUARDRAIL (ดักชื่อไฟล์ผิด) <-- เพิ่มตรงนี้
+            # 🛡️ 7. GUARDRAILS & SAFETY LOCKS (✅ RESTORED & VERIFIED)
             # =========================================================
+            target_file = args.get("file_path", "")
+
+            # --- 7.1 Filename Guardrail ---
             if action in ["write_file", "edit_file", "append_file"]:
-                target_file = args.get("file_path", "").replace("\\", "/")  # Normalize path
-
-                # กฎ: ถ้าเขียนลง docs/ ต้องชื่อ specs.md เท่านั้น
-                if target_file.startswith("docs/") and target_file != "docs/specs.md":
-                    print(f"🚫 BLOCKED: Wrong spec filename '{target_file}'")
-                    error_msg = (
-                        f"❌ FILENAME ERROR: You are trying to write to '{target_file}'.\n"
-                        f"⚠️ STANDARD VIOLATION: The spec file MUST be named exactly 'docs/specs.md'.\n"
-                        f"👉 ACTION: Rename the file path to 'docs/specs.md' and try again."
-                    )
+                clean_target = target_file.replace("\\", "/")
+                if clean_target.startswith("docs/") and clean_target != "docs/specs.md":
+                    print(f"🚫 BLOCKED: Wrong spec filename '{clean_target}'")
+                    error_msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'. Rename it."
                     step_outputs.append(error_msg)
                     history.append({"role": "assistant", "content": content})
                     history.append({"role": "user", "content": error_msg})
-                    continue  # 🛑 หยุดทันที
+                    break
 
-            # =========================================================
-            # 2️⃣ SPEC GUARDRAIL (อันใหม่ - เพิ่มต่อท้ายตรงนี้!)
-            # =========================================================
+            # --- 7.2 Spec Guardrail ---
             if action in ["write_file", "edit_file", "append_file"]:
-                target_file = args.get("file_path", "")
-
-                # เช็คว่าไฟล์ที่จะเขียนคือ Source Code หรือ Test หรือไม่
                 if target_file.startswith("src/") or target_file.startswith("tests/"):
-
-                    # เช็คว่ามีไฟล์ Spec หรือยัง?
                     spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
                     if not os.path.exists(spec_path):
-                        # 🚫 ถ้ายังไม่มี Spec -> บล็อกทันที!
-                        print(f"🚫 BLOCKED: Attempt to modify code without specs.md")
-                        error_msg = (
-                            "❌ SYSTEM POLICY VIOLATION: You CANNOT modify 'src/' or 'tests/' yet.\n"
-                            "⚠️ REASON: The file 'docs/specs.md' does not exist on disk.\n"
-                            "👉 ACTION REQUIRED: You MUST write the 'docs/specs.md' file first to define the requirements.\n"
-                            "Please execute write_file('docs/specs.md', content) now."
-                        )
-
-                        # บันทึก Error ลง History เพื่อให้ AI รู้ตัว
-                        step_outputs.append(error_msg)
+                        msg = "❌ POLICY VIOLATION: You MUST write 'docs/specs.md' before modifying code."
+                        print(msg)
+                        step_outputs.append(msg)
                         history.append({"role": "assistant", "content": content})
-                        history.append({"role": "user", "content": error_msg})
-                        continue  # 🚀 ข้ามการทำงานรอบนี้ไปเลย (ไม่รัน execute_tool_dynamic)
+                        history.append({"role": "user", "content": msg})
+                        break
 
-            # =========================================================
-
-            # =========================================================
-            # 🛡️ 3️⃣ SAFETY LOCK (ป้องกันการเขียนทับไฟล์มั่วซั่ว) <-- เพิ่มตรงนี้
-            # =========================================================
+            # --- 7.3 Safety Lock (Overwrite Protection) ---
             if action == "write_file":
-                target_path = args.get("file_path", "")
-                full_path = os.path.join(settings.AGENT_WORKSPACE, target_path)  # ต้องใช้ path เต็มเพื่อเช็คไฟล์จริง
-
-                # เงื่อนไข: ถ้าไฟล์มีอยู่แล้ว และเป็นไฟล์ Python (.py) (ไม่นับพวก config/md)
-                if os.path.exists(full_path) and target_path.endswith(".py"):
+                full_path = os.path.join(settings.AGENT_WORKSPACE, target_file)
+                if os.path.exists(full_path) and target_file.endswith(".py"):
                     try:
-                        # อ่านไฟล์เดิมมาเช็คความยาว
                         with open(full_path, 'r', encoding='utf-8') as f:
                             old_content = f.read()
-
                         new_content = args.get("content", "")
-
-                        # 🚨 กฎเหล็ก: ถ้าของใหม่สั้นกว่าของเก่าเกิน 50% แสดงว่า AI กำลังจะลบโค้ดทิ้ง!
                         if len(new_content) < len(old_content) * 0.5:
-                            print(f"🚫 BLOCKED: Prevented accidental overwrite of {target_path}")
-                            error_msg = (
-                                f"🚫 SAFETY BLOCK: You are trying to overwrite '{target_path}' with content significantly shorter than the original.\n"
-                                f"⚠️ DANGER: Using `write_file` will DELETE the existing code! (Old: {len(old_content)} chars -> New: {len(new_content)} chars)\n"
-                                f"👉 ACTION: \n"
-                                f"   1. Use `append_file` to add new endpoints/classes at the bottom.\n"
-                                f"   2. Use `edit_file` to modify specific parts.\n"
-                                f"   3. If you really mean to rewrite, verify the content matches the full file logic."
-                            )
-
-                            # บันทึก Error และเด้งกลับ
-                            step_outputs.append(error_msg)
+                            msg = f"🚫 SAFETY BLOCK: Preventing accidental large delete on {target_file}."
+                            print(msg)
+                            step_outputs.append(msg)
                             history.append({"role": "assistant", "content": content})
-                            history.append({"role": "user", "content": error_msg})
-                            continue  # 🛑 หยุดทันที รักษาชีวิตโค้ดเก่าไว้
+                            history.append({"role": "user", "content": msg})
+                            break
                     except Exception as e:
                         print(f"⚠️ Safety check warning: {e}")
 
             # =========================================================
+            # 🚀 8. EXECUTE
+            # =========================================================
+            # ใน loop ก่อน execute_tool_dynamic
+            if action == "run_command":
+                cmd = args.get("command", "")
+                # ถ้าสั่ง up แต่ลืม -d ให้เติมให้เองเลย
+                if "docker-compose up" in cmd and "-d" not in cmd:
+                    print("🔧 Auto-fixing: Added '-d' to docker-compose up")
+                    args["command"] = cmd.replace("docker-compose up", "docker-compose up -d")
 
             print(f"🔧 Executing: {action}")
-            # 1. รันเครื่องมือตามปกติ
             res_data = execute_tool_dynamic(action, args)
             result_for_ai = res_data["output"]
 
-            # 2. ตรวจสอบผลลัพธ์: ถ้าเป็นการ "แก้ไขไฟล์" และ "สำเร็จ"
-            file_tools = ["write_file", "append_file", "edit_file"]
-            if action in file_tools and res_data["success"]:
+            if action in ["write_file", "append_file", "edit_file"] and res_data["success"]:
                 persistent_code_block = None
-                # ใช้ sys.stderr เพื่อให้ Log ไปโผล่ใน Claude Desktop โดยไม่ทำให้ระบบพัง
-                print(f"DEBUG: Memory flushed for {action}", file=sys.stderr)
+                print("DEBUG: Memory flushed.", file=sys.stderr)
 
-            # =========================================================
-            # 🟢 [NEW] BATCHING DETECTOR (แจ้งเตือน AI ถ้ามันเผลอรัวคำสั่ง)
-            # =========================================================
-            if len(tool_calls) > 1:
-                print(f"⚠️ Warning: Agent tried to batch {len(tool_calls)} tools. Executing only the first one.")
+            # --- Batching Detector Logic (Restored) ---
+            if len(unique_tools) > 1:
+                print(f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
                 result_for_ai += (
                     f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
-                    f"You sent {len(tool_calls)} actions at once. "
+                    f"You sent {len(unique_tools)} actions at once. "
                     f"I executed ONLY the first one ('{action}'). "
-                    f"The other {len(tool_calls) - 1} actions were IGNORED. "
+                    f"The other {len(unique_tools) - 1} actions were IGNORED. "
                     f"Wait for this result before sending the next command."
                 )
 
-            # Show brief result
-            display = f"✅ File operation success: {args.get('file_path')}" if "success" in str(
-                result_for_ai).lower() and action.startswith("write") else result_for_ai
-            print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
+            # =========================================================
+            # 🎨 SMART LOGGING DISPLAY (แก้ตรงนี้!)
+            # =========================================================
 
+            # ถ้าเป็นการรันคำสั่ง (เช่น pytest) ให้โชว์ยาวๆ หน่อย (Max 2000 chars)
+            if action == "run_command":
+                log_display = result_for_ai
+                if len(log_display) > 2000:
+                    log_display = log_display[:2000] + "\n... [Output Truncated] ..."
+                print(f"📄 Result:\n{log_display}")
+
+            # ถ้าเป็นการเขียนไฟล์ หรืออื่นๆ ให้ตัดสั้น (Max 300 chars)
+            else:
+                display = f"✅ File operation success: {target_file}" if "success" in str(
+                    result_for_ai).lower() and action.startswith("write") else result_for_ai
+                print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
+
+            # บันทึกของจริงลง History (ส่งให้ AI ดู)
             step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
-            break  # Atomic execution
+            break
+
 
         if task_finished:
-            print(f"\n✅ BUILD COMPLETE: {result_for_ai}")
-            return result_for_ai
+            print(f"\n✅ BUILD COMPLETE.")
+            return
 
         history.append({"role": "assistant", "content": content})
         history.append({"role": "user", "content": "\n".join(step_outputs)})
@@ -856,7 +681,6 @@ def run_hephaestus_task(task: str, max_steps: int = 45):
 
 
 if __name__ == "__main__":
-    # Support command line args for testing
     if len(sys.argv) > 1:
         run_hephaestus_task(sys.argv[1])
     else:

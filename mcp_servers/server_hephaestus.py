@@ -13,7 +13,10 @@ if sys.platform == "win32":
     # บังคับ UTF-8
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
-
+try:
+    import core.network_fix
+except ImportError:
+    pass
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -95,36 +98,34 @@ def assign_task_async(task_description: str) -> str:
     """
     Start a long-running coding task. Returns a Job ID immediately.
     """
-    # 1. สร้าง Job ID
     job_id = str(uuid.uuid4())[:8]
+    agent_name = "hephaestus"  # ✅ กำหนดชื่อตรงนี้
 
-    # 2. ✅ Context Injection (จัด Format ให้ชิดซ้าย สวยงาม)
-    # ใส่ ID ลงไปเพื่อให้ Agent มองเห็นและหยิบไปใช้
+    # ปรับ Prompt ให้สั่ง Agent ส่ง agent_name ด้วย
     augmented_task_description = f"""{task_description}
 
 --------------------------------------------------
 [SYSTEM CONTEXT]
 Current Job ID: {job_id}
+Agent Name: {agent_name}
 
 👉 **CRITICAL INSTRUCTION**: 
 If you need to initialize the workspace (git clone/checkout), you MUST call:
-`git_setup_workspace(issue_key='...', job_id='{job_id}')`
+`git_setup_workspace(issue_key='...', agent_name='{agent_name}', job_id='{job_id}')`
 
-This ensures the branch name is unique (e.g., feature/SCRUM-29-hephaestus-{job_id}).
+This ensures the branch name is unique and correctly tagged (e.g., feature/SCRUM-29-{agent_name}-{job_id}).
 --------------------------------------------------
 """
 
-    # 3. เตรียม Memory (เก็บ Task เดิมไว้โชว์ User จะได้ไม่งง)
     JOBS[job_id] = {
         "task": task_description,
         "status": "PENDING",
         "start_time": time.strftime("%H:%M:%S")
     }
 
-    # 4. ส่ง Prompt ที่ "ยัดไส้" แล้ว ไปให้ Worker
     thread = threading.Thread(
         target=background_worker,
-        args=(job_id, augmented_task_description) # 👈 ส่งตัวที่แก้แล้วไป
+        args=(job_id, augmented_task_description)
     )
     thread.daemon = True
     thread.start()

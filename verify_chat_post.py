@@ -16,7 +16,7 @@ def allowed_gai_family():
 connection.allowed_gai_family = allowed_gai_family
 
 # 3. 🎯 ตั้งค่าเป้าหมาย
-base_url = "https://9gjwsbc50f6jyt-11434.proxy.runpod.net"
+base_url = "https://ku5rp3pvihdvb3-11434.proxy.runpod.net"
 chat_url = f"{base_url}/api/chat"
 model_name = "qwen2.5-coder:32b"  # เอาชื่อมาจากที่คุณเช็คเจอเมื่อกี้
 
