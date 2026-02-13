@@ -238,6 +238,40 @@ This applies to write_file, append_file, and edit_file.
    - ❌ WRONG: `git commit -m 'My Message'`
    - ✅ RIGHT: `git commit -m "My Message"`
 
+### 1. File Operations
+- **read_file(file_path)**
+- **write_file(file_path, content)**
+- **append_file(file_path, content)**
+- **edit_file(file_path, target_text, replacement_text)**
+- **list_files(directory=".")**
+  Lists files in a directory. Default is current directory.
+
+### 2. Git & Workflow
+- **git_setup_workspace(issue_key, base_branch="main", ...)**
+  Initializes the workspace based on the JIRA issue.
+- **git_commit(message)**
+  Auto-stages (`git add .`) and commits.
+- **git_push(branch_name=None)**
+  Pushes to remote. If `branch_name` is omitted, pushes the current branch.
+- **git_pull(branch_name=None)**
+  Pulls latest changes.
+- **create_pr(title, body="Automated PR...", base_branch="main", head_branch=None)**
+  Creates a PR.
+  - `title`: Required.
+  - `body`: Optional description.
+  - `base_branch`: Target branch (default: main).
+  - `head_branch`: Source branch (default: current branch).
+
+### 3. System & JIRA
+- **get_jira_issue(issue_key)**
+  Fetches requirements (e.g., "SCRUM-29").
+- **run_command(command, cwd=None, timeout=300)**
+  Runs a shell command.
+- **install_package(package_name)**
+  Installs packages.
+- **task_complete(issue_key=None, summary=None)**
+  Call ONLY when the task is fully done.
+
 RESPONSE FORMAT (JSON ONLY):
 {{ "action": "tool_name", "args": {{ ... }} }}
 """
@@ -339,10 +373,90 @@ TOOLS = {
 }
 
 TOOL_SCHEMAS = {
-    "edit_file": {"required": ["target_text", "replacement_text"], "file_path": True},
-    "write_file": {"required": ["content"], "file_path": True},
-    "append_file": {"required": ["content"], "file_path": True},
-    "read_file": {"required": [], "file_path": True},
+    # --- JIRA & Setup ---
+    "get_jira_issue": {
+        "required": ["issue_key"],
+        "file_path": False,
+        "description": "Fetches details of a JIRA issue."
+    },
+    "git_setup_workspace": {
+        "required": ["issue_key"],
+        "optional": ["base_branch", "agent_name", "job_id"],
+        "file_path": False,
+        "description": "Clones repo, checks out branch based on JIRA issue."
+    },
+
+    # --- File Operations ---
+    "list_files": {
+        "required": [],
+        "optional": ["directory"], # มี default value = "."
+        "file_path": False,
+        "description": "Lists files in the specified directory."
+    },
+    "read_file": {
+        "required": [],
+        "file_path": True, # รับ file_path เป็น arg แรก
+        "description": "Reads file content."
+    },
+    "write_file": {
+        "required": ["content"],
+        "file_path": True,
+        "description": "Overwrites file with content."
+    },
+    "append_file": {
+        "required": ["content"],
+        "file_path": True,
+        "description": "Appends content to end of file."
+    },
+    "edit_file": {
+        "required": ["target_text", "replacement_text"],
+        "file_path": True,
+        "description": "Replaces exact string matches."
+    },
+
+    # --- Git Operations ---
+    "git_commit": {
+        "required": ["message"],
+        "file_path": False,
+        "description": "Stages all files and commits with message."
+    },
+    "git_push": {
+        "required": [],
+        "optional": ["branch_name"], # มี default value = None
+        "file_path": False,
+        "description": "Pushes changes to remote."
+    },
+    "git_pull": {
+        "required": [],
+        "optional": ["branch_name"], # มี default value = None
+        "file_path": False,
+        "description": "Pulls latest changes."
+    },
+    "create_pr": {
+        "required": ["title"],
+        "optional": ["body", "base_branch", "head_branch"], # มี default value หมด
+        "file_path": False,
+        "description": "Creates a GitHub Pull Request."
+    },
+
+    # --- System ---
+    "run_command": { # Map กับ run_sandbox_command
+        "required": ["command"],
+        "optional": ["cwd", "timeout"],
+        "file_path": False,
+        "description": "Runs a shell command."
+    },
+    "install_package": {
+        "required": ["package_name"],
+        "file_path": False,
+        "description": "Installs a Python/System package."
+    },
+    "task_complete": {
+        "required": [],
+        "optional": ["issue_key", "summary", "mode"],
+        "file_path": False,
+        "description": "Marks task as finished."
+    }
 }
 
 
@@ -371,17 +485,82 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
 # ==============================================================================
 
 def sanitize_json_input(raw_text):
+    # 1. Markdown Cleanup (โค้ดเดิมของคุณ)
     clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
     clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
     clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
 
+    # 2. Triple Quote Fix (โค้ดเดิมของคุณ - ใช้ได้ดีสำหรับ Python script)
     def fix_triple_quotes(match):
         content = match.group(1).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
         return f'"{content}"'
 
     clean_text = re.sub(r'"""(.*?)"""', fix_triple_quotes, clean_text, flags=re.DOTALL)
-    return clean_text.strip()
 
+    clean_text = clean_text.strip()
+
+    # 3. 🚀 NEW: Single Quote Auto-Fix (Python Dict -> JSON)
+    # ถ้า Agent เผลอส่ง { 'action': '...' } มา มันคือ Python Dict
+    # เราจะลองแปลงมันเป็น Python Object แล้ว Dump กลับมาเป็น JSON มาตรฐาน (Double Quotes)
+    try:
+        # เทคนิค: แปลง true/false/null แบบ JS ให้เป็น Python ก่อน (กันเหนียว)
+        py_compatible_text = clean_text.replace("true", "True").replace("false", "False").replace("null", "None")
+
+        # ลอง Parse ด้วย AST (ปลอดภัยกว่า eval)
+        # ถ้าผ่าน แปลว่ามันคือ Dict ที่ใช้ Single Quote หรือ Double Quote ก็ได้
+        parsed = ast.literal_eval(py_compatible_text)
+
+        if isinstance(parsed, (dict, list)):
+            # Dump กลับเป็น JSON String มาตรฐาน (Double Quote เท่านั้น)
+            return json.dumps(parsed)
+    except:
+        # ถ้าแปลงไม่ได้ (เช่น JSON ขาดตอน) ให้ปล่อยผ่านไปใช้ Regex ข้างล่างต่อ
+        pass
+
+    # 4. Fallback: Regex Fix สำหรับ Single Quote (กรณีที่ AST พัง)
+    # พยายามเปลี่ยน 'key': 'value' ให้เป็น "key": "value" แบบดิบๆ
+    # (เปลี่ยน ' ที่อยู่หลัง { [ , : ให้เป็น ")
+    clean_text = re.sub(r"(?<=[\{\[\,\:])\s*'(?![s\w])", ' "', clean_text)
+    # (เปลี่ยน ' ที่อยู่หน้า } ] , : ให้เป็น ")
+    clean_text = re.sub(r"(?<![s\w])'\s*(?=[\}\]\,\:])", '" ', clean_text)
+
+    return clean_text
+
+
+# def parse_agent_response_priority(text: str):
+#     """
+#     จัดลำดับความสำคัญ:
+#     1. ถ้าเจอ JSON Action -> ให้ยึด Action เป็นหลัก (Ignore code blocks อื่นๆ ที่เป็นแค่ Summary)
+#     2. ถ้าไม่เจอ Action -> ค่อยไปดูว่ามี Code Block ที่ต้องเขียนไฟล์ไหม
+#     """
+#
+#     # 1. ลองหา JSON Action ก่อน (Priority สูงสุด)
+#     jsons = _extract_all_jsons(text)
+#
+#     # กรองเอาเฉพาะที่มี key 'action' จริงๆ เพื่อความชัวร์
+#     valid_actions = [j for j in jsons if "action" in j]
+#
+#     if valid_actions:
+#         # ✅ เจอ Action! จบข่าว ไม่สน Code Block อื่น
+#         # เอาตัวสุดท้าย (Latest thought) มาใช้
+#         return {
+#             "type": "action",
+#             "content": valid_actions[-1]
+#         }
+#
+#     # 2. ถ้าไม่มี Action เลย ค่อยลองหา Code Block (เช่น กรณีเขียนไฟล์)
+#     code_block = extract_code_block(text)
+#     if code_block:
+#         return {
+#             "type": "code",
+#             "content": code_block
+#         }
+#
+#     # 3. ถ้าไม่มีอะไรเลย ก็คือข้อความคุยเล่น
+#     return {
+#         "type": "text",
+#         "content": text
+#     }
 
 def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
     results = []
@@ -412,18 +591,28 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
     return results
 
 
-def extract_code_block(text: str) -> str:
-    all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
-    if not all_blocks: return None
-    for block in reversed(all_blocks):
-        if '"action":' in block: continue
-        return block
-    return None
+# def extract_code_block(text: str) -> str:
+#     all_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+#     if not all_blocks: return None
+#     for block in reversed(all_blocks):
+#         if '"action":' in block: continue
+#         return block
+#     return None
 
 
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
+import json
+import re
+import os
+import sys
+import uuid
+from datetime import datetime
+
+
+# (สมมติว่า imports และ functions อื่นๆ ครบถ้วนแล้ว)
+
 def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
     if settings.CURRENT_AGENT_NAME != "Hephaestus":
         settings.CURRENT_AGENT_NAME = "Hephaestus"
@@ -432,20 +621,15 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
     if not job_id:
         job_id = f"manual_{uuid.uuid4().hex[:8]}"
 
-    # --- แก้ไขส่วนนี้ ---
-    # หาตำแหน่งของไฟล์ agent.py นี้ (D:\Project\Olympus-Agents\agents\hephaestus\agent.py)
+    # --- Path Setup ---
     current_script_path = os.path.abspath(__file__)
-    # ถอยกลับไป 2 ระดับ เพื่อไปที่โฟลเดอร์หลักของโปรเจกต์ (D:\Project\Olympus-Agents)
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_script_path)))
-
-    # บังคับให้สร้างโฟลเดอร์ logs ใน Project Root
     logs_dir = os.path.join(project_root, "logs", "hephaestus")
-    # ------------------
 
     os.makedirs(logs_dir, exist_ok=True)
     log_filename = os.path.join(logs_dir, f"job_{job_id}.log")
 
-    # 🌟 Redirect print to BOTH console and file
+    # Setup Dual Logger
     original_stdout = sys.stdout
     dual_logger = DualLogger(log_filename)
     sys.stdout = dual_logger
@@ -461,17 +645,17 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
 
         agent_action_history = []
         consecutive_test_failures = 0
+        persistent_code_block = None
 
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": task}
         ]
 
-
-        persistent_code_block = None
-
         for step in range(max_steps):
             print(f"\n🔄 Thinking (Step {step + 1})...")
+
+            # --- LLM Query ---
             try:
                 response = query_qwen(history)
                 if isinstance(response, dict):
@@ -485,69 +669,73 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
             print(f"🤖 Hephaestus: {content[:100]}...")
 
             # =========================================================
-            # 🟢 1. MIDDLEWARE: CAPTURE & VALIDATE CODE BLOCK (SMART & SAFE)
+            # 🟢 1. PARSE & PRIORITIZE (FIXED for Infinite Loop)
             # =========================================================
 
-            all_raw_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
-            # กรอง JSON Action ออก
-            valid_code_blocks = [b for b in all_raw_blocks if '"action":' not in b]
+            # 1.1 Extract JSON Actions FIRST
+            content_cleaned = sanitize_json_input(content)
+            tool_calls = _extract_all_jsons(content_cleaned)
+
+            # 🛑 IMMUNITY CHECK: ถ้าจบงาน ให้ข้ามการตรวจ Code Block ทั้งหมด
+            # (แก้ปัญหาที่ Agent ชอบสรุปงานยาวๆ แล้วมี Code Block หลายอันจนโดนบล็อก)
+            is_task_finishing = any(t.get("action") == "task_complete" for t in tool_calls)
 
             new_code_block = None
 
-            if not valid_code_blocks:
-                # Case 0: ไม่เจอ Code เลย
-                pass
-
-            elif len(valid_code_blocks) == 1:
-                # Case 1: เจออันเดียว -> จบข่าว ใช้เลย
-                new_code_block = valid_code_blocks[0]
-
+            if is_task_finishing:
+                print("🏁 Task Completion Detected: Bypassing ambiguity checks (ignoring summary blocks).")
+                # ไม่ต้องหา code block ปล่อยให้มันจบงานไปเลย
             else:
-                # Case 2: เจอหลายอัน -> ต้องระวัง! ⚠️
-                # เรียงลำดับจาก ยาวมาก -> สั้นน้อย
-                sorted_blocks = sorted(valid_code_blocks, key=len, reverse=True)
-                big_block = sorted_blocks[0]
-                second_block = sorted_blocks[1]
+                # --- เข้าสู่โหมดปกติ (เฉพาะเมื่อยังไม่จบงาน) ---
 
-                # 🕵️‍♂️ เช็คก่อนว่ากำลังเขียนไฟล์อะไร?
-                target_file = args.get("file_path", "").lower()
-                is_markdown = target_file.endswith(".md")
+                # 🕵️‍♂️ Sniff File Type
+                is_markdown_mode = False
+                if tool_calls:
+                    first_args = tool_calls[0].get("args", {})
+                    target_path = first_args.get("file_path", "").lower()
+                    if target_path.endswith(".md"):
+                        is_markdown_mode = True
 
-                # 📏 DOMINANCE CHECK (กฎ 20%)
-                # ถ้าก้อนรอง (Second) มีขนาดใหญ่เกิน 20% ของก้อนหลัก (Main)
-                # แปลว่ามันน่าจะเป็น "ไฟล์แยก" ไม่ใช่แค่ "Snippet ประกอบ"
-                if not is_markdown and len(second_block) > len(big_block) * 0.2:
-                    print(
-                        f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks ({len(big_block)} chars vs {len(second_block)} chars).")
-                    error_msg = (
-                        "🛑 SYSTEM ERROR: Multiple Files Detected!\n"
-                        "I found two large code blocks. I cannot determine which one to write.\n"
-                        "👉 RULE: Send ONE file per message. Wait for the result before sending the next one."
-                    )
-                    history.append({"role": "assistant", "content": content})
-                    history.append({"role": "user", "content": error_msg})
-                    continue
+                # 1.2 Extract Code Blocks
+                all_code_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
+                valid_code_blocks = [b for b in all_code_blocks if '"action":' not in b]
 
-                # ถ้าผ่าน (ก้อนรองเล็กจิ๋ว) -> สรุปว่าเป็น Docs ที่มี Snippet -> เลือกก้อนใหญ่สุด
-                new_code_block = big_block
+                if valid_code_blocks:
+                    sorted_blocks = sorted(valid_code_blocks, key=len, reverse=True)
+                    big_block = sorted_blocks[0]
 
-            # -------------------------------------------------------------
-            # Update Memory
+                    # Check Ambiguity (กฎ 20%)
+                    if len(sorted_blocks) > 1 and not is_markdown_mode:
+                        second_block = sorted_blocks[1]
+                        if len(second_block) > len(big_block) * 0.2 and len(tool_calls) <= 1:
+                            print(f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks.")
+                            error_msg = (
+                                "🛑 SYSTEM ERROR: Multiple Files Detected!\n"
+                                "I found two large code blocks but I'm not in Markdown mode.\n"
+                                "👉 RULE: Send ONE file per message."
+                            )
+                            history.append({"role": "assistant", "content": content})
+                            history.append({"role": "user", "content": error_msg})
+                            continue
+
+                    new_code_block = big_block
+
+            # Update Memory (Update เฉพาะถ้าไม่ใช่การจบงาน หรือถ้ามี Block ใหม่)
             if new_code_block:
                 persistent_code_block = new_code_block.strip()
                 print(f"📦 Captured NEW code block ({len(persistent_code_block)} chars)")
                 print(f"✨ NEW memory captured.")
-            elif persistent_code_block:
+            elif persistent_code_block and not is_task_finishing:
                 print("♻️  No new code found, using existing memory.")
+            elif is_task_finishing:
+                print("ℹ️  Task finishing: Memory hold released.")
             else:
                 print("⚠️  No code in memory yet.")
 
-            # 🟢 2. PARSE TOOLS
-            content_cleaned = sanitize_json_input(content)
-            tool_calls = _extract_all_jsons(content_cleaned)
-
-            # 🟢 3. SMART RECOVERY
-            if not tool_calls and ('"action":' in content or "```json" in content):
+            # =========================================================
+            # 🟢 2. RECOVERY & VALIDATION
+            # =========================================================
+            if not tool_calls and ('"action":' in content):
                 print("🚨 DETECTED MALFORMED JSON. Attempting Smart Recovery...")
                 action_match = re.search(r'"action"\s*:\s*"(\w+)"', content)
                 path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', content)
@@ -557,24 +745,24 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     found_path = path_match.group(1)
                     if found_action in ["write_file", "append_file"]:
                         print(f"🔧 Auto-Recovered: Executing {found_action} on {found_path}")
-                        tool_calls = [
-                            {"action": found_action, "args": {"file_path": found_path, "content": persistent_code_block}}]
+                        tool_calls = [{"action": found_action,
+                                       "args": {"file_path": found_path, "content": persistent_code_block}}]
 
-                if not tool_calls:
-                    print("❌ Recovery Failed. Sending Error Message.")
-                    history.append({"role": "assistant", "content": content})
-                    history.append({"role": "user",
-                                    "content": "❌ SYSTEM ERROR: JSON Validation Failed! Please use the 'LAST_CODE_BLOCK' pattern."})
-                    continue
+            if not tool_calls:
+                print("❌ No valid action found.")
+                history.append({"role": "assistant", "content": content})
+                continue
 
-            # 🟢 4. EXECUTION LOOP
-            seen_tools = set()
+            # =========================================================
+            # 🟢 3. EXECUTION LOOP
+            # =========================================================
             unique_tools = []
-            for tool in tool_calls:
-                tool_str = json.dumps(tool, sort_keys=True)
-                if tool_str not in seen_tools:
-                    seen_tools.add(tool_str)
-                    unique_tools.append(tool)
+            seen = set()
+            for t in tool_calls:
+                s = json.dumps(t, sort_keys=True)
+                if s not in seen:
+                    seen.add(s)
+                    unique_tools.append(t)
 
             step_outputs = []
             task_finished = False
@@ -583,22 +771,25 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                 action = tool_call.get("action")
                 args = tool_call.get("args", {})
 
-                # --- Task Complete Logic (Verified & Restored) ---
+                # 🛡️ GLOBAL VARIABLES
+                target_file = args.get("file_path", "").replace("\\", "/")
+                workspace = settings.AGENT_WORKSPACE
+
+                # ---------------------------------------------------------
+                # 🏆 TASK COMPLETE LOGIC
+                # ---------------------------------------------------------
                 if action == "task_complete":
                     task_mode = args.get("mode", "code").lower()
                     validation_error = None
-                    workspace = settings.AGENT_WORKSPACE
-                    # 1. ลองเช็คดูว่ามีไฟล์อะไรที่ควรจะถูกลบ (Dry Run)
-                    clean_preview = run_sandbox_command("git clean -nd", cwd=workspace)
 
-                    # 2. เช็คสถานะ Git แบบละเอียด
+                    # 🧹 CLEANLINESS CHECK
+                    clean_preview = run_sandbox_command("git clean -nd", cwd=workspace)
                     status = run_sandbox_command("git status --porcelain", cwd=workspace)
 
                     if status.strip():
-                        # ❌ ส่ง "หลักฐาน" ทั้งหมดกลับไปมัดตัว Agent
                         error_msg = (
                             "❌ FATAL: WORKSPACE IS DIRTY.\n"
-                            "I found untracked/uncommitted files. You must clean them or commit them.\n\n"
+                            "I found untracked/uncommitted files. You CANNOT finish the task until clean.\n\n"
                             f"--- [Git Porcelain Output] ---\n'{status}'\n\n"
                             f"--- [Suggested Cleanup (git clean -nd)] ---\n{clean_preview}\n\n"
                             "👉 ACTION: Use 'git add .' then commit, or manually 'rm' the files above."
@@ -606,13 +797,12 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                         history.append({"role": "user", "content": error_msg})
                         continue
 
-                    # 2. Verify Work (Mode Based)
+                        # 🔍 VERIFY WORK
                     if not validation_error:
-                        current_branch = run_sandbox_command("git branch --show-current", cwd=workspace)
-                        if "HEAD detached" in current_branch or not current_branch:
-                            current_branch = "HEAD"
+                        current_branch_raw = run_sandbox_command("git branch --show-current", cwd=workspace)
+                        current_branch = current_branch_raw.strip() if current_branch_raw else "HEAD"
 
-                        is_main = current_branch in ["main", "master"]
+                        is_main = current_branch in ["main", "master", "HEAD"]
                         source_files = []
                         config_files = []
                         test_files = []
@@ -646,7 +836,6 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                     "If this is just analysis, please use mode='analysis'."
                                 )
                             elif not source_files and (config_files or test_files):
-                                # อนุโลมให้ผ่านถ้าแก้แค่ Config/Test แต่เตือนหน่อย
                                 print("⚠️ Note: Only config/test files changed. Assuming infrastructure/testing task.")
 
                             elif not is_main and not validation_error:
@@ -654,22 +843,18 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                 if "no open pull requests" in pr_check or not pr_check.strip():
                                     validation_error = "❌ REJECTED: Code committed but NO Pull Request (PR) found. Please create a PR first."
 
-                            # ---------------------------------------------------------
-                            # 🐳 DOCKER CHECK (แทรกตรงนี้! เฉพาะ Code Mode และไม่มี Error ก่อนหน้า)
-                            # ---------------------------------------------------------
+                            # DOCKER CHECK
                             if not validation_error:
-                                # 1. เช็คประวัติ (History Check)
                                 has_deployed = False
                                 valid_deploy_actions = ["up", "restart", "start"]
-
                                 for record in agent_action_history:
                                     if record['action'] == 'run_command':
                                         cmd = record['args'].get('command', '').strip().lower()
                                         is_docker_compose = "docker" in cmd and "compose" in cmd
-                                        cmd_parts = cmd.split()
-                                        if is_docker_compose and any(act in cmd_parts for act in valid_deploy_actions):
-                                            has_deployed = True
-                                            break
+                                        if is_docker_compose:
+                                            if any(act in cmd for act in valid_deploy_actions):
+                                                has_deployed = True
+                                                break
 
                                 if not has_deployed:
                                     validation_error = (
@@ -677,18 +862,14 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                         "You haven't restarted the services to verify your changes.\n"
                                         "👉 You MUST run: `docker-compose up -d --build`"
                                     )
-
-                                # 2. เช็คสถานะจริง (Status Check) - กันเหนียว
                                 else:
                                     docker_check = run_sandbox_command("docker ps", cwd=workspace)
-                                    # ปรับ Keyword ตามชื่อ Container/Image ของคุณ
                                     if "api" not in docker_check and "payment" not in docker_check and "hephaestus" not in docker_check:
                                         validation_error = (
                                             "❌ REJECTED: Deployment Failed!\n"
                                             "You ran the command, but 'docker ps' shows NO running containers.\n"
                                             "Did the container crash? Check logs."
                                         )
-                            # ---------------------------------------------------------
 
                         # === CASE B: Analysis Mode ===
                         elif task_mode == "analysis":
@@ -696,13 +877,11 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                 print(
                                     f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
 
-                    # 3. Final Decision
                     if validation_error:
                         print(f"🚫 {validation_error}")
-                        step_outputs.append(validation_error)
-                        break  # ดีดกลับไปทำใหม่
+                        history.append({"role": "user", "content": validation_error})
+                        continue
                     else:
-                        # ✅ ผ่านทุกด่าน จบงานได้
                         task_finished = True
                         step_outputs.append(f"Task Completed: {args.get('summary', 'Done')}")
                         break
@@ -712,21 +891,20 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     continue
 
                 # =========================================================
-                # 🟢 5. MIDDLEWARE INJECTION (Replace LAST_CODE_BLOCK)
+                # 💉 5. MIDDLEWARE INJECTION (LAST_CODE_BLOCK)
                 # =========================================================
                 if "LAST_CODE_BLOCK" in str(args):
                     if not persistent_code_block:
-                        print("🛡️ INTERCEPTED: Agent tried to use LAST_CODE_BLOCK but memory is empty.")
-                        error_msg = "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but forgot to write the Markdown code block first."
+                        error_msg = "🛑 PRE-EXECUTION ERROR: You used 'LAST_CODE_BLOCK' but memory is empty."
                         step_outputs.append(error_msg)
                         break
 
-                    if action == "edit_file" and args.get("replacement_text") == "LAST_CODE_BLOCK":
-                        args["replacement_text"] = persistent_code_block
-                        print("✏️ Auto-attached replacement text from memory.")
-                    elif action in ["write_file", "append_file"] and args.get("content") == "LAST_CODE_BLOCK":
+                    if action in ["write_file", "append_file"]:
                         args["content"] = persistent_code_block
-                        print(f"📝 Auto-attached content to {args.get('file_path')} from memory.")
+                        print(f"📝 Auto-attached content to {target_file}")
+                    elif action == "edit_file":
+                        args["replacement_text"] = persistent_code_block
+                        print("✏️ Auto-attached replacement text.")
 
                 # =========================================================
                 # 🧹 6. MARKDOWN STRIPPER
@@ -737,34 +915,29 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                         args[key] = re.sub(r"\n```$", "", args[key]).strip()
 
                 # =========================================================
-                # 🛡️ 7. GUARDRAILS & SAFETY LOCKS (✅ RESTORED & VERIFIED)
+                # 🛡️ 7. GUARDRAILS (Strict)
                 # =========================================================
-                target_file = args.get("file_path", "")
-
-                # --- 7.1 Filename Guardrail ---
-                if action in ["write_file", "edit_file", "append_file"]:
+                if action.endswith("_file"):
                     clean_target = target_file.replace("\\", "/")
+                    # Filename Guardrail
                     if clean_target.startswith("docs/") and clean_target != "docs/specs.md":
-                        print(f"🚫 BLOCKED: Wrong spec filename '{clean_target}'")
-                        error_msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'. Rename it."
-                        step_outputs.append(error_msg)
+                        msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'."
+                        step_outputs.append(msg)
                         history.append({"role": "assistant", "content": content})
-                        history.append({"role": "user", "content": error_msg})
+                        history.append({"role": "user", "content": msg})
                         break
 
-                # --- 7.2 Spec Guardrail ---
-                if action in ["write_file", "edit_file", "append_file"]:
-                    if target_file.startswith("src/") or target_file.startswith("tests/"):
+                    # Spec Guardrail
+                    if clean_target.startswith("src/") or clean_target.startswith("tests/"):
                         spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
                         if not os.path.exists(spec_path):
-                            msg = "❌ POLICY VIOLATION: You MUST write 'docs/specs.md' before modifying code."
-                            print(msg)
+                            msg = "❌ POLICY VIOLATION: Write 'docs/specs.md' first."
                             step_outputs.append(msg)
                             history.append({"role": "assistant", "content": content})
                             history.append({"role": "user", "content": msg})
                             break
 
-                # --- 7.3 Safety Lock (Overwrite Protection) ---
+                # Safety Lock (Overwrite)
                 if action == "write_file":
                     full_path = os.path.join(settings.AGENT_WORKSPACE, target_file)
                     if os.path.exists(full_path) and target_file.endswith(".py"):
@@ -773,94 +946,71 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                 old_content = f.read()
                             new_content = args.get("content", "")
                             if len(new_content) < len(old_content) * 0.5:
-                                msg = f"🚫 SAFETY BLOCK: Preventing accidental large delete on {target_file}."
-                                print(msg)
+                                msg = f"🚫 SAFETY BLOCK: Preventing large delete on {target_file}."
                                 step_outputs.append(msg)
-                                history.append({"role": "assistant", "content": content})
-                                history.append({"role": "user", "content": msg})
                                 break
-                        except Exception as e:
-                            print(f"⚠️ Safety check warning: {e}")
+                        except Exception:
+                            pass
 
                 # =========================================================
                 # 🚀 8. EXECUTE
                 # =========================================================
-                # =========================================================
-                # 1️⃣ PRE-EXECUTION: แก้ไขคำสั่งก่อนรัน (Docker Auto-Fix)
-                # =========================================================
+                # Auto-fix Docker commands
                 if action == "run_command":
                     cmd = args.get("command", "")
-
-                    # กฎ 1: ถ้าสั่ง up เฉยๆ ให้เติม --build และ -d
                     if "docker-compose up" in cmd:
-                        if "--build" not in cmd:
-                            cmd = cmd.replace("docker-compose up", "docker-compose up --build")
-                        if "-d" not in cmd:
-                            cmd = cmd.replace("docker-compose up", "docker-compose up -d")
-                        print(f"🔧 Auto-fixing command to: {cmd}")
+                        if "--build" not in cmd: cmd = cmd.replace("up", "up --build")
+                        if "-d" not in cmd: cmd = cmd.replace("up", "up -d")
                         args["command"] = cmd
+                        print(f"🔧 Auto-fixing command to: {cmd}")
 
-                    # กฎ 2: ป้องกัน BuildKit ค้าง
-                    if "docker-compose" in cmd:
-                        # 1. เช็คก่อนว่า Agent พยายามตั้งค่าเองหรือยัง? (ถ้าตั้งแล้ว ปล่อยมัน)
-                        if "DOCKER_BUILDKIT" not in cmd:
-                            # 2. ⚠️ FIX: ลบเว้นวรรคหลังเลข 0 ออก! (Windows CMD เรื่องมากตรงนี้)
-                            # จาก "set ...=0 &&" เป็น "set ...=0&&"
-                            args["command"] = f"set DOCKER_BUILDKIT=0&& {args['command']}"
-                            print(f"🔧 Network Fix Applied: Forced IPv4 & Disabled BuildKit")
+                    if "docker" in cmd and "DOCKER_BUILDKIT" not in cmd:
+                        args["command"] = f"set DOCKER_BUILDKIT=0&& {args['command']}"
+                        print(f"🔧 Network Fix Applied")
 
-                # บันทึก History ว่าจะทำอะไร
+                # Record & Execute
                 agent_action_history.append({"action": action, "args": args})
                 print(f"🔧 Executing: {action}")
 
-                # =========================================================
-                # 2️⃣ EXECUTION: รันของจริง!
-                # =========================================================
-                # ส่ง args ที่แก้แล้วไปรัน
                 res_data = execute_tool_dynamic(action, args)
                 result_for_ai = res_data["output"]
 
+                # Memory Flush
                 if action in ["write_file", "append_file", "edit_file"] and res_data["success"]:
                     persistent_code_block = None
                     print("DEBUG: Memory flushed.", file=sys.stderr)
 
                 # =========================================================
-                # 3️⃣ POST-EXECUTION: ตรวจสอบผลลัพธ์ (Loop Detector อยู่ตรงนี้!)
+                # 🔁 LOOP & ERROR DETECTOR (Pytest) - RESTORED!
                 # =========================================================
-                # 🛑 LOOP DETECTOR: เช็คว่า Pytest พังซ้ำซากไหม?
                 if action == "run_command" and "pytest" in args.get("command", ""):
-                    if "FAILURES" in str(result_for_ai) or "ERRORS" in str(result_for_ai) or "[ERROR]" in str(
-                            result_for_ai):
+                    if "FAILURES" in str(result_for_ai) or "ERRORS" in str(result_for_ai):
                         consecutive_test_failures += 1
                         print(f"⚠️ Pytest Failed! Count: {consecutive_test_failures}")
                     else:
-                        consecutive_test_failures = 0  # Reset ถ้ารันผ่าน
+                        consecutive_test_failures = 0
 
-                    # ถ้าผิดซ้ำ 2 รอบขึ้นไป แทรกแซงทันที!
                     if consecutive_test_failures >= 2:
-                        # 🕵️‍♂️ หาชื่อไฟล์ล่าสุดที่เพิ่งแก้ไป (ย้อนหลังดูจาก History)
-                        last_edited_file = "the source code"  # ค่า Default
+                        last_edited_file = "the source code"
                         for record in reversed(agent_action_history):
                             if record['action'] in ["write_file", "edit_file", "append_file"]:
                                 last_edited_file = record['args'].get('file_path', "the source code")
                                 break
 
-                        # สร้างคำเตือนแบบ Dynamic
+                        # ✅ RESTORED: Dynamic Warning Message
                         warning_msg = (
                             "\n\n🛑 SYSTEM INTERVENTION (RULE #7 TRIGGERED):\n"
                             f"You have failed the tests {consecutive_test_failures} times in a row!\n"
-                            f"👉 STOP editing `{last_edited_file}`.\n"  # <--- ตรงนี้จะเปลี่ยนตามไฟล์จริง
+                            f"👉 STOP editing `{last_edited_file}`.\n"
                             "👉 The error is likely in the TEST file expectation, not the code.\n"
                             "👉 ACTION: Check the TEST file logic and fix the assertion if it's unrealistic."
                         )
-
                         print(warning_msg)
                         result_for_ai += warning_msg
 
-                # --- Batching Detector Logic ---
+                # --- ✅ RESTORED: Batching Detector Logic ---
                 if len(unique_tools) > 1:
-                    print(
-                        f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
+                    print(f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
                     result_for_ai += (
                         f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
                         f"You sent {len(unique_tools)} actions at once. "
@@ -869,46 +1019,37 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                         f"Wait for this result before sending the next command."
                     )
 
-                # =========================================================
-                # 🎨 SMART LOGGING DISPLAY
-                # =========================================================
+                # Send Result
                 if action == "run_command":
                     log_display = result_for_ai
                     if len(log_display) > 2000:
-                        log_display = log_display[:2000] + "\n... [Output Truncated] ..."
+                        log_display = log_display[:800] + "\n... [TRUNCATED] ...\n" + log_display[-1200:]
                     print(f"📄 Result:\n{log_display}")
                 else:
-                    target_file = args.get("file_path", "unknown")
-                    display = f"✅ File operation success: {target_file}" if "success" in str(
-                        res_data).lower() and action.startswith("write") else str(result_for_ai)
-                    print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
+                    print(f"📄 Result: {str(result_for_ai)[:300]}...")
 
-                # ส่งผลลัพธ์กลับไปให้ AI
-                step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
+                step_outputs.append(f"Tool Output: {result_for_ai}")
+
+                # ✅ Break loop to enforce anti-batching
                 break
 
-
+                # --- Check Finish ---
             if task_finished:
-                print(f"\n✅ BUILD COMPLETE.")
+                print("\n✅ MISSION ACCOMPLISHED.")
                 return
 
+            # Append to history
             history.append({"role": "assistant", "content": content})
             history.append({"role": "user", "content": "\n".join(step_outputs)})
 
         print("❌ FAILED: Max steps reached.")
 
-
     finally:
-
-        # ✅ ใช้ locals() เช็คก่อนว่าตัวแปรมีอยู่จริงไหม กันโปรแกรมพังซ้ำซ้อน
-
         if 'original_stdout' in locals():
             sys.stdout = original_stdout
-
         if 'dual_logger' in locals():
             dual_logger.close()
 
-            print(f"🔒 Log file closed: {log_filename}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
