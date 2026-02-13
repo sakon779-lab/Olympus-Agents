@@ -75,7 +75,7 @@ def background_worker(job_id: str, task_description: str):
     try:
         # ใช้ Context Manager เพื่อให้ Log ออกทาง stderr (Terminal)
         with redirect_stdout_to_stderr():
-            result = run_hephaestus_task(task_description)
+            result = run_hephaestus_task(task_description, job_id=job_id)
 
         JOBS[job_id]["status"] = "COMPLETED"
         JOBS[job_id]["result"] = result
@@ -101,21 +101,23 @@ def assign_task_async(task_description: str) -> str:
     job_id = str(uuid.uuid4())[:8]
     agent_name = "hephaestus"  # ✅ กำหนดชื่อตรงนี้
 
-    # ปรับ Prompt ให้สั่ง Agent ส่ง agent_name ด้วย
-    augmented_task_description = f"""{task_description}
+    clean_task_description = task_description
 
---------------------------------------------------
-[SYSTEM CONTEXT]
-Current Job ID: {job_id}
-Agent Name: {agent_name}
-
-👉 **CRITICAL INSTRUCTION**: 
-If you need to initialize the workspace (git clone/checkout), you MUST call:
-`git_setup_workspace(issue_key='...', agent_name='{agent_name}', job_id='{job_id}')`
-
-This ensures the branch name is unique and correctly tagged (e.g., feature/SCRUM-29-{agent_name}-{job_id}).
---------------------------------------------------
-"""
+#     # ปรับ Prompt ให้สั่ง Agent ส่ง agent_name ด้วย
+#     augmented_task_description = f"""{task_description}
+#
+# --------------------------------------------------
+# [SYSTEM CONTEXT]
+# Current Job ID: {job_id}
+# Agent Name: {agent_name}
+#
+# 👉 **CRITICAL INSTRUCTION**:
+# If you need to initialize the workspace (git clone/checkout), you MUST call:
+# `git_setup_workspace(issue_key='...', agent_name='{agent_name}', job_id='{job_id}')`
+#
+# This ensures the branch name is unique and correctly tagged (e.g., feature/SCRUM-29-{agent_name}-{job_id}).
+# --------------------------------------------------
+# """
 
     JOBS[job_id] = {
         "task": task_description,
@@ -125,7 +127,7 @@ This ensures the branch name is unique and correctly tagged (e.g., feature/SCRUM
 
     thread = threading.Thread(
         target=background_worker,
-        args=(job_id, augmented_task_description)
+        args=(job_id, clean_task_description)
     )
     thread.daemon = True
     thread.start()

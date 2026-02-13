@@ -82,6 +82,7 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main", agent_name: s
         feature_branch = f"feature/{issue_key}-{agent_name}"
 
     logger.info(f"🔧 Agent '{agent_name}' setup...")
+    logger.info(f"🌿 Job ID: {job_id}")
     logger.info(f"   📂 Workspace: {agent_workspace}")
     logger.info(f"   🌿 Target Branch: {feature_branch}")
 

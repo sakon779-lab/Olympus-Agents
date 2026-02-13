@@ -272,6 +272,11 @@ This applies to write_file, append_file, and edit_file.
 - **task_complete(issue_key=None, summary=None)**
   Call ONLY when the task is fully done.
 
+## Verification Rules
+1. Rely primarily on automated tests (`pytest`).
+2. If `pytest` passes, you do NOT need to manually verify endpoints using `curl` or `wget` unless explicitly asked.
+3. Trust that if the Docker container is "Up" (via `docker ps`), the deployment is successful.
+
 RESPONSE FORMAT (JSON ONLY):
 {{ "action": "tool_name", "args": {{ ... }} }}
 """
@@ -461,15 +466,36 @@ TOOL_SCHEMAS = {
 
 
 def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    if tool_name not in TOOLS: return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
+    if tool_name not in TOOLS:
+        return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
+
     if tool_name in TOOL_SCHEMAS:
         schema = TOOL_SCHEMAS[tool_name]
-        valid_keys = set(schema["required"])
-        if schema.get("file_path"): valid_keys.add("file_path")
-        if set(args.keys()) - valid_keys: return {"success": False,
-                                                  "output": f"[ERROR] Invalid arguments. Expected: {list(valid_keys)}"}
-        missing = [k for k in schema["required"] if k not in args]
-        if missing: return {"success": False, "output": f"[ERROR] Missing required arguments: {missing}"}
+
+        # ✅ FIX 1: เริ่มต้นด้วย Required keys
+        valid_keys = set(schema.get("required", []))
+
+        # ✅ FIX 2: เติม Optional keys เข้าไปด้วย! (นี่คือจุดที่ขาดไป)
+        if "optional" in schema:
+            valid_keys.update(schema["optional"])
+
+        # ✅ FIX 3: เติม file_path (ถ้ามี)
+        if schema.get("file_path"):
+            valid_keys.add("file_path")
+
+        # 🕵️‍♂️ Check: มีตัวแปรแปลกปลอมไหม?
+        unknown_args = set(args.keys()) - valid_keys
+        if unknown_args:
+            return {
+                "success": False,
+                "output": f"[ERROR] Invalid arguments: {list(unknown_args)}. Allowed: {list(valid_keys)}"
+            }
+
+        # 🕵️‍♂️ Check: ตัวแปรบังคับครบไหม?
+        missing = [k for k in schema.get("required", []) if k not in args]
+        if missing:
+            return {"success": False, "output": f"[ERROR] Missing required arguments: {missing}"}
+
     try:
         func = TOOLS[tool_name]
         raw_result = str(func(**args))
@@ -484,13 +510,19 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
 # 🧩 HELPER FUNCTIONS
 # ==============================================================================
 
+import re
+import ast
+import json
+import sys  # เพิ่ม import sys เพื่อใช้ print stderr
+
+
 def sanitize_json_input(raw_text):
-    # 1. Markdown Cleanup (โค้ดเดิมของคุณ)
+    # 1. Markdown Cleanup
     clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
     clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
     clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
 
-    # 2. Triple Quote Fix (โค้ดเดิมของคุณ - ใช้ได้ดีสำหรับ Python script)
+    # 2. Triple Quote Fix
     def fix_triple_quotes(match):
         content = match.group(1).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
         return f'"{content}"'
@@ -499,29 +531,26 @@ def sanitize_json_input(raw_text):
 
     clean_text = clean_text.strip()
 
-    # 3. 🚀 NEW: Single Quote Auto-Fix (Python Dict -> JSON)
-    # ถ้า Agent เผลอส่ง { 'action': '...' } มา มันคือ Python Dict
-    # เราจะลองแปลงมันเป็น Python Object แล้ว Dump กลับมาเป็น JSON มาตรฐาน (Double Quotes)
+    # 3. 🚀 Single Quote Auto-Fix (Python Dict -> JSON)
     try:
-        # เทคนิค: แปลง true/false/null แบบ JS ให้เป็น Python ก่อน (กันเหนียว)
+        # เทคนิค: แปลง Boolean/Null ให้เป็น Python
         py_compatible_text = clean_text.replace("true", "True").replace("false", "False").replace("null", "None")
 
-        # ลอง Parse ด้วย AST (ปลอดภัยกว่า eval)
-        # ถ้าผ่าน แปลว่ามันคือ Dict ที่ใช้ Single Quote หรือ Double Quote ก็ได้
+        # ลอง Parse
         parsed = ast.literal_eval(py_compatible_text)
 
         if isinstance(parsed, (dict, list)):
-            # Dump กลับเป็น JSON String มาตรฐาน (Double Quote เท่านั้น)
             return json.dumps(parsed)
-    except:
-        # ถ้าแปลงไม่ได้ (เช่น JSON ขาดตอน) ให้ปล่อยผ่านไปใช้ Regex ข้างล่างต่อ
+
+    except Exception as e:
+        # ⚠️ DEBUG: ปริ้นท์ออกมาดูว่าทำไม AST ถึงพัง (ช่วยได้เยอะมากตอนแก้บั๊ก)
+        print(f"⚠️ [Sanitize] AST Parse Failed: {e}", file=sys.stderr)
+        # print(f"⚠️ [Sanitize] Problematic Text: {clean_text[:100]}...", file=sys.stderr)
         pass
 
-    # 4. Fallback: Regex Fix สำหรับ Single Quote (กรณีที่ AST พัง)
-    # พยายามเปลี่ยน 'key': 'value' ให้เป็น "key": "value" แบบดิบๆ
-    # (เปลี่ยน ' ที่อยู่หลัง { [ , : ให้เป็น ")
+    # 4. Fallback: Regex Fix (ใช้เฉพาะตอนจำเป็นจริงๆ)
+    # ข้อควรระวัง: Regex นี้อาจทำลาย string ที่มี " ซ้อนอยู่ข้างใน
     clean_text = re.sub(r"(?<=[\{\[\,\:])\s*'(?![s\w])", ' "', clean_text)
-    # (เปลี่ยน ' ที่อยู่หน้า } ] , : ให้เป็น ")
     clean_text = re.sub(r"(?<![s\w])'\s*(?=[\}\]\,\:])", '" ', clean_text)
 
     return clean_text
@@ -786,15 +815,43 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     clean_preview = run_sandbox_command("git clean -nd", cwd=workspace)
                     status = run_sandbox_command("git status --porcelain", cwd=workspace)
 
+                    # --- 🟢 FIX START: กรอง Noise ออก ---
+                    dirty_items = []
+
+                    # 1. เช็ค Untracked Files (จาก git clean)
+                    if clean_preview.strip():
+                        for line in clean_preview.splitlines():
+                            line = line.strip()
+                            # ข้ามบรรทัดว่าง หรือข้อความที่ไม่ใช่ไฟล์
+                            if line and "Would remove" in line:
+                                dirty_items.append(line)
+
+                    # 2. เช็ค Modified Files (จาก git status --porcelain)
                     if status.strip():
+                        for line in status.splitlines():
+                            line = line.strip()
+                            # ข้าม Warning หรือ Note
+                            if not line: continue
+                            if line.lower().startswith("warning") or line.lower().startswith("note"):
+                                continue
+                            # ถ้าเป็น ?? (Untracked) หรือ M (Modified) หรือ A (Added)
+                            if line[:2].strip() in ["??", "M", "A", "D", "R", "C", "U"]:
+                                dirty_items.append(line)
+                    # --- 🔴 FIX END ---
+
+                    if dirty_items:
                         error_msg = (
                             "❌ FATAL: WORKSPACE IS DIRTY.\n"
-                            "I found untracked/uncommitted files. You CANNOT finish the task until clean.\n\n"
-                            f"--- [Git Porcelain Output] ---\n'{status}'\n\n"
-                            f"--- [Suggested Cleanup (git clean -nd)] ---\n{clean_preview}\n\n"
-                            "👉 ACTION: Use 'git add .' then commit, or manually 'rm' the files above."
+                            "I found untracked/uncommitted changes:\n"
+                            f"{chr(10).join(dirty_items[:10])}\n"  # โชว์แค่ 10 บรรทัดแรกพอ
+                            "(...and more)\n\n" if len(dirty_items) > 10 else "\n"
+                                                                              f"--- [Suggested Cleanup] ---\n"
+                                                                              f"1. Commit them: `git add .` -> `git commit`\n"
+                                                                              f"2. Or delete them: `git clean -fd`\n"
+                                                                              "👉 ACTION: Cleanup is REQUIRED before completing the task."
                         )
                         history.append({"role": "user", "content": error_msg})
+                        print(f"🚫 blocked task_complete due to dirty files: {dirty_items}")
                         continue
 
                         # 🔍 VERIFY WORK
@@ -955,20 +1012,35 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                 # =========================================================
                 # 🚀 8. EXECUTE
                 # =========================================================
-                # Auto-fix Docker commands
-                if action == "run_command":
+
+                # --- Auto-fix Docker commands ---
+                elif action == "run_command":
                     cmd = args.get("command", "")
+
+                    # 1. Fix: Ensure detached & build
                     if "docker-compose up" in cmd:
                         if "--build" not in cmd: cmd = cmd.replace("up", "up --build")
                         if "-d" not in cmd: cmd = cmd.replace("up", "up -d")
                         args["command"] = cmd
                         print(f"🔧 Auto-fixing command to: {cmd}")
 
+                    # 2. Fix: Disable BuildKit (Network fix)
                     if "docker" in cmd and "DOCKER_BUILDKIT" not in cmd:
                         args["command"] = f"set DOCKER_BUILDKIT=0&& {args['command']}"
                         print(f"🔧 Network Fix Applied")
 
-                # Record & Execute
+                # --- 💉 MIDDLEWARE INJECTION (System Overrides) ---
+                elif action == "git_setup_workspace":
+                    # 1. Inject Job ID
+                    args["job_id"] = job_id
+
+                    # 2. ✅ Inject Agent Name (Dynamic form Settings)
+                    current_agent = getattr(settings, "CURRENT_AGENT_NAME", "Unknown").lower()
+                    args["agent_name"] = current_agent
+
+                    print(f"💉 System Injected: agent_name='{current_agent}', job_id='{job_id}'")
+
+                # --- Record & Execute ---
                 agent_action_history.append({"action": action, "args": args})
                 print(f"🔧 Executing: {action}")
 
