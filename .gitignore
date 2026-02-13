@@ -9,3 +9,4 @@ pg_data/
 mcp_debug.log
 chroma_db/
 *.sqlite3
+logs/

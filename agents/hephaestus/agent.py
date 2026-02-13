@@ -94,6 +94,13 @@ This applies to write_file, append_file, and edit_file.
 
 *** 🛡️ SPECIALIZED CODING RULES ***
 1. **PYDANTIC VALIDATORS**: When fixing Pydantic validators (`@validator`, `@field_validator`), DO NOT use `edit_file`. Always use `write_file` to redefine the entire Pydantic model class.
+2. **DOCKER RULES**: 
+   - ALWAYS use `docker-compose up -d --build` to restart services. 
+   - This ensures the old container is replaced by the new version and prevents port conflicts.
+   - NEVER run `docker-compose up` without `-d`.
+3. **PYTHON VERSION (CRITICAL)**: 
+   - ALWAYS use `python:3.11-slim` as the base image in your `Dockerfile`. 
+   - DO NOT use 3.10 or other versions because modern libraries in this project (like Numpy 2.x) require Python 3.11+.
 
 *** 🛡️ DATA TRANSMISSION PROTOCOL (THE "REFERENCE PATTERN") ***
 ⚠️ CRITICAL RULE: ONE FILE PER TURN
@@ -125,6 +132,11 @@ This applies to write_file, append_file, and edit_file.
 4. **TDD (Test-Driven)**: 🔴 Write failing test -> 🟢 Write code -> 🔵 Refactor.
 5. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
 6. **NO HALLUCINATIONS**: If you didn't call `write_file`, the file wasn't created. Verify everything.
+7. **LOGICAL CONFLICT RESOLUTION (CRITICAL)**:
+   - If a test fails more than 2 times despite your code changes, STOP editing the source code.
+   - **THINK**: "Is the test case itself logically sound?"
+   - **ACTION**: Open the test file, read the inputs (e.g., "Medium1"), and compare them with the expected outputs (e.g., "Add an uppercase letter").
+   - If the input already satisfies the rule (e.g., 'M' is an uppercase), you MUST fix the TEST file instead of the source code.
 
 *** 🤖 AGENT BEHAVIOR (NO CHAT MODE) ***
 1. **YOU ARE HANDS-ON**: Never say "Please run this command". YOU run it using `run_command`.
@@ -234,16 +246,26 @@ RESPONSE FORMAT (JSON ONLY):
 # ==============================================================================
 # 🛠️ SANDBOX TOOLS
 # ==============================================================================
-def run_sandbox_command(command: str, timeout: int = 300) -> str:
+# แก้ไขบรรทัดนี้: เพิ่ม cwd: str = None เข้าไป
+def run_sandbox_command(command: str, cwd: str = None, timeout: int = 300) -> str:
     workspace = settings.AGENT_WORKSPACE
-    if not os.path.exists(workspace):
-        return f"❌ Error: Workspace not found. Did you run 'git_setup_workspace'?"
-    logger.info(f"⚡ Executing in Sandbox: {command}")
+
+    # ถ้ามีการส่ง cwd มาให้ใช้ค่าที่ส่งมา ถ้าไม่มีให้ใช้ workspace ปกติ
+    target_cwd = cwd if cwd else workspace
+
+    # เช็คว่า path มีอยู่จริงไหม
+    if not os.path.exists(target_cwd):
+        return f"❌ Error: Working directory not found: {target_cwd}"
+
+    logger.info(f"⚡ Executing in Sandbox: {command} (cwd={target_cwd})")
+
     try:
+        # ตั้งค่า Environment (ใช้ workspace หลักในการหา .venv เสมอ เพื่อความชัวร์)
         env = os.environ.copy()
         env["PYTHONPATH"] = workspace + os.pathsep + env.get("PYTHONPATH", "")
         env["PYTHONUTF8"] = "1"
         env["PIP_NO_INPUT"] = "1"
+
         venv_path = os.path.join(workspace, ".venv")
         if os.path.exists(venv_path):
             if os.name == 'nt':
@@ -253,14 +275,32 @@ def run_sandbox_command(command: str, timeout: int = 300) -> str:
             if os.path.exists(venv_scripts):
                 env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
                 env["VIRTUAL_ENV"] = venv_path
-        result = subprocess.run(command, shell=True, cwd=workspace, capture_output=True, text=True, encoding='utf-8',
-                                errors='replace', env=env, input="", timeout=timeout)
+
+        # รันคำสั่งโดยใช้ target_cwd ที่เราเลือกมา
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=target_cwd,  # <--- ใช้ตัวแปรนี้แทน
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
+            input="",
+            timeout=timeout
+        )
+
         output = result.stdout.strip()
         error = result.stderr.strip()
+
         if result.returncode == 0:
+            # ถ้า output ยาวเกินไป ตัดให้สั้นลงหน่อย (Optional)
+            if len(output) > 2000:
+                return f"✅ Command Success:\n{output[:2000]}\n... [Output Truncated]"
             return f"✅ Command Success:\n{output}"
         else:
             return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
+
     except subprocess.TimeoutExpired:
         return f"⏰ Command Timeout! (Over {timeout}s)."
     except Exception as e:
@@ -376,7 +416,16 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
     if not job_id:
         job_id = f"manual_{uuid.uuid4().hex[:8]}"
 
-    logs_dir = os.path.join("logs", "hephaestus")
+    # --- แก้ไขส่วนนี้ ---
+    # หาตำแหน่งของไฟล์ agent.py นี้ (D:\Project\Olympus-Agents\agents\hephaestus\agent.py)
+    current_script_path = os.path.abspath(__file__)
+    # ถอยกลับไป 2 ระดับ เพื่อไปที่โฟลเดอร์หลักของโปรเจกต์ (D:\Project\Olympus-Agents)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_script_path)))
+
+    # บังคับให้สร้างโฟลเดอร์ logs ใน Project Root
+    logs_dir = os.path.join(project_root, "logs", "hephaestus")
+    # ------------------
+
     os.makedirs(logs_dir, exist_ok=True)
     log_filename = os.path.join(logs_dir, f"job_{job_id}.log")
 
@@ -393,6 +442,9 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
         print(f"📋 Task: {task}")
         print(f"📁 Log File: {os.path.abspath(log_filename)}")
         print(f"==================================================\n")
+
+        agent_action_history = []
+        consecutive_test_failures = 0
 
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -441,10 +493,14 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                 big_block = sorted_blocks[0]
                 second_block = sorted_blocks[1]
 
+                # 🕵️‍♂️ เช็คก่อนว่ากำลังเขียนไฟล์อะไร?
+                target_file = args.get("file_path", "").lower()
+                is_markdown = target_file.endswith(".md")
+
                 # 📏 DOMINANCE CHECK (กฎ 20%)
                 # ถ้าก้อนรอง (Second) มีขนาดใหญ่เกิน 20% ของก้อนหลัก (Main)
                 # แปลว่ามันน่าจะเป็น "ไฟล์แยก" ไม่ใช่แค่ "Snippet ประกอบ"
-                if len(second_block) > len(big_block) * 0.2:
+                if not is_markdown and len(second_block) > len(big_block) * 0.2:
                     print(
                         f"🚫 BLOCKED: Ambiguous! Found 2 significant code blocks ({len(big_block)} chars vs {len(second_block)} chars).")
                     error_msg = (
@@ -518,13 +574,13 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     workspace = settings.AGENT_WORKSPACE
 
                     # 1. Check Uncommitted Changes
-                    status = run_git_cmd("git status --porcelain", cwd=workspace)
+                    status = run_sandbox_command("git status --porcelain", cwd=workspace)
                     if status.strip():
                         validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
 
-                    # 2. Verify Work (Mode Based) - ✅ RESTORED
+                    # 2. Verify Work (Mode Based)
                     if not validation_error:
-                        current_branch = run_git_cmd("git branch --show-current", cwd=workspace)
+                        current_branch = run_sandbox_command("git branch --show-current", cwd=workspace)
                         if "HEAD detached" in current_branch or not current_branch:
                             current_branch = "HEAD"
 
@@ -535,7 +591,8 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                         has_changes = False
 
                         if not is_main:
-                            diff_output = run_git_cmd(f"git diff --name-only main...{current_branch}", cwd=workspace)
+                            diff_output = run_sandbox_command(f"git diff --name-only main...{current_branch}",
+                                                              cwd=workspace)
                             changed_files = diff_output.strip().splitlines()
                             if changed_files:
                                 has_changes = True
@@ -561,17 +618,49 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                     "If this is just analysis, please use mode='analysis'."
                                 )
                             elif not source_files and (config_files or test_files):
-                                validation_error = (
-                                    "❌ REJECTED: No SOURCE CODE changes detected!\n"
-                                    f"   - Config/Docs changed: {config_files}\n"
-                                    f"   - Tests changed: {test_files}\n"
-                                    "⚠️ But NO changes in 'src/' or logic files found.\n"
-                                    "Feature implementation MUST include source code changes."
-                                )
+                                # อนุโลมให้ผ่านถ้าแก้แค่ Config/Test แต่เตือนหน่อย
+                                print("⚠️ Note: Only config/test files changed. Assuming infrastructure/testing task.")
+
                             elif not is_main and not validation_error:
-                                pr_check = run_git_cmd(f"gh pr list --head {current_branch}", cwd=workspace)
+                                pr_check = run_sandbox_command(f"gh pr list --head {current_branch}", cwd=workspace)
                                 if "no open pull requests" in pr_check or not pr_check.strip():
                                     validation_error = "❌ REJECTED: Code committed but NO Pull Request (PR) found. Please create a PR first."
+
+                            # ---------------------------------------------------------
+                            # 🐳 DOCKER CHECK (แทรกตรงนี้! เฉพาะ Code Mode และไม่มี Error ก่อนหน้า)
+                            # ---------------------------------------------------------
+                            if not validation_error:
+                                # 1. เช็คประวัติ (History Check)
+                                has_deployed = False
+                                valid_deploy_actions = ["up", "restart", "start"]
+
+                                for record in agent_action_history:
+                                    if record['action'] == 'run_command':
+                                        cmd = record['args'].get('command', '').strip().lower()
+                                        is_docker_compose = "docker" in cmd and "compose" in cmd
+                                        cmd_parts = cmd.split()
+                                        if is_docker_compose and any(act in cmd_parts for act in valid_deploy_actions):
+                                            has_deployed = True
+                                            break
+
+                                if not has_deployed:
+                                    validation_error = (
+                                        "❌ REJECTED: Definition of Done (DoD) failed!\n"
+                                        "You haven't restarted the services to verify your changes.\n"
+                                        "👉 You MUST run: `docker-compose up -d --build`"
+                                    )
+
+                                # 2. เช็คสถานะจริง (Status Check) - กันเหนียว
+                                else:
+                                    docker_check = run_sandbox_command("docker ps", cwd=workspace)
+                                    # ปรับ Keyword ตามชื่อ Container/Image ของคุณ
+                                    if "api" not in docker_check and "payment" not in docker_check and "hephaestus" not in docker_check:
+                                        validation_error = (
+                                            "❌ REJECTED: Deployment Failed!\n"
+                                            "You ran the command, but 'docker ps' shows NO running containers.\n"
+                                            "Did the container crash? Check logs."
+                                        )
+                            # ---------------------------------------------------------
 
                         # === CASE B: Analysis Mode ===
                         elif task_mode == "analysis":
@@ -579,11 +668,13 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                                 print(
                                     f"⚠️ WARNING: Task completed in 'analysis' mode, but file changes were detected on {current_branch}.")
 
+                    # 3. Final Decision
                     if validation_error:
                         print(f"🚫 {validation_error}")
                         step_outputs.append(validation_error)
-                        break
+                        break  # ดีดกลับไปทำใหม่
                     else:
+                        # ✅ ผ่านทุกด่าน จบงานได้
                         task_finished = True
                         step_outputs.append(f"Task Completed: {args.get('summary', 'Done')}")
                         break
@@ -666,15 +757,38 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                 # =========================================================
                 # 🚀 8. EXECUTE
                 # =========================================================
-                # ใน loop ก่อน execute_tool_dynamic
+                # =========================================================
+                # 1️⃣ PRE-EXECUTION: แก้ไขคำสั่งก่อนรัน (Docker Auto-Fix)
+                # =========================================================
                 if action == "run_command":
                     cmd = args.get("command", "")
-                    # ถ้าสั่ง up แต่ลืม -d ให้เติมให้เองเลย
-                    if "docker-compose up" in cmd and "-d" not in cmd:
-                        print("🔧 Auto-fixing: Added '-d' to docker-compose up")
-                        args["command"] = cmd.replace("docker-compose up", "docker-compose up -d")
 
+                    # กฎ 1: ถ้าสั่ง up เฉยๆ ให้เติม --build และ -d
+                    if "docker-compose up" in cmd:
+                        if "--build" not in cmd:
+                            cmd = cmd.replace("docker-compose up", "docker-compose up --build")
+                        if "-d" not in cmd:
+                            cmd = cmd.replace("docker-compose up", "docker-compose up -d")
+                        print(f"🔧 Auto-fixing command to: {cmd}")
+                        args["command"] = cmd
+
+                    # กฎ 2: ป้องกัน BuildKit ค้าง
+                    if "docker-compose" in cmd:
+                        # 1. เช็คก่อนว่า Agent พยายามตั้งค่าเองหรือยัง? (ถ้าตั้งแล้ว ปล่อยมัน)
+                        if "DOCKER_BUILDKIT" not in cmd:
+                            # 2. ⚠️ FIX: ลบเว้นวรรคหลังเลข 0 ออก! (Windows CMD เรื่องมากตรงนี้)
+                            # จาก "set ...=0 &&" เป็น "set ...=0&&"
+                            args["command"] = f"set DOCKER_BUILDKIT=0&& {args['command']}"
+                            print(f"🔧 Network Fix Applied: Forced IPv4 & Disabled BuildKit")
+
+                # บันทึก History ว่าจะทำอะไร
+                agent_action_history.append({"action": action, "args": args})
                 print(f"🔧 Executing: {action}")
+
+                # =========================================================
+                # 2️⃣ EXECUTION: รันของจริง!
+                # =========================================================
+                # ส่ง args ที่แก้แล้วไปรัน
                 res_data = execute_tool_dynamic(action, args)
                 result_for_ai = res_data["output"]
 
@@ -682,9 +796,43 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     persistent_code_block = None
                     print("DEBUG: Memory flushed.", file=sys.stderr)
 
-                # --- Batching Detector Logic (Restored) ---
+                # =========================================================
+                # 3️⃣ POST-EXECUTION: ตรวจสอบผลลัพธ์ (Loop Detector อยู่ตรงนี้!)
+                # =========================================================
+                # 🛑 LOOP DETECTOR: เช็คว่า Pytest พังซ้ำซากไหม?
+                if action == "run_command" and "pytest" in args.get("command", ""):
+                    if "FAILURES" in str(result_for_ai) or "ERRORS" in str(result_for_ai) or "[ERROR]" in str(
+                            result_for_ai):
+                        consecutive_test_failures += 1
+                        print(f"⚠️ Pytest Failed! Count: {consecutive_test_failures}")
+                    else:
+                        consecutive_test_failures = 0  # Reset ถ้ารันผ่าน
+
+                    # ถ้าผิดซ้ำ 2 รอบขึ้นไป แทรกแซงทันที!
+                    if consecutive_test_failures >= 2:
+                        # 🕵️‍♂️ หาชื่อไฟล์ล่าสุดที่เพิ่งแก้ไป (ย้อนหลังดูจาก History)
+                        last_edited_file = "the source code"  # ค่า Default
+                        for record in reversed(agent_action_history):
+                            if record['action'] in ["write_file", "edit_file", "append_file"]:
+                                last_edited_file = record['args'].get('file_path', "the source code")
+                                break
+
+                        # สร้างคำเตือนแบบ Dynamic
+                        warning_msg = (
+                            "\n\n🛑 SYSTEM INTERVENTION (RULE #7 TRIGGERED):\n"
+                            f"You have failed the tests {consecutive_test_failures} times in a row!\n"
+                            f"👉 STOP editing `{last_edited_file}`.\n"  # <--- ตรงนี้จะเปลี่ยนตามไฟล์จริง
+                            "👉 The error is likely in the TEST file expectation, not the code.\n"
+                            "👉 ACTION: Check the TEST file logic and fix the assertion if it's unrealistic."
+                        )
+
+                        print(warning_msg)
+                        result_for_ai += warning_msg
+
+                # --- Batching Detector Logic ---
                 if len(unique_tools) > 1:
-                    print(f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
+                    print(
+                        f"⚠️ Warning: Agent tried to batch {len(unique_tools)} tools. Executing only the first one.")
                     result_for_ai += (
                         f"\n\n🚨 SYSTEM ALERT: You violated the 'No Batching' rule! "
                         f"You sent {len(unique_tools)} actions at once. "
@@ -694,23 +842,20 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     )
 
                 # =========================================================
-                # 🎨 SMART LOGGING DISPLAY (แก้ตรงนี้!)
+                # 🎨 SMART LOGGING DISPLAY
                 # =========================================================
-
-                # ถ้าเป็นการรันคำสั่ง (เช่น pytest) ให้โชว์ยาวๆ หน่อย (Max 2000 chars)
                 if action == "run_command":
                     log_display = result_for_ai
                     if len(log_display) > 2000:
                         log_display = log_display[:2000] + "\n... [Output Truncated] ..."
                     print(f"📄 Result:\n{log_display}")
-
-                # ถ้าเป็นการเขียนไฟล์ หรืออื่นๆ ให้ตัดสั้น (Max 300 chars)
                 else:
+                    target_file = args.get("file_path", "unknown")
                     display = f"✅ File operation success: {target_file}" if "success" in str(
-                        result_for_ai).lower() and action.startswith("write") else result_for_ai
+                        res_data).lower() and action.startswith("write") else str(result_for_ai)
                     print(f"📄 Result: {display[:300]}..." if len(display) > 300 else f"📄 Result: {display}")
 
-                # บันทึกของจริงลง History (ส่งให้ AI ดู)
+                # ส่งผลลัพธ์กลับไปให้ AI
                 step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
                 break
 
