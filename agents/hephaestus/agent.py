@@ -243,6 +243,20 @@ RESPONSE FORMAT (JSON ONLY):
 """
 
 
+def truncate_middle(text: str, limit: int = 2500) -> str:
+    """ช่วยตัดข้อความตรงกลางออกเพื่อให้เห็นทั้งจุดเริ่มต้นและจุดจบของ Log"""
+    if not text or len(text) <= limit:
+        return text
+
+    head_size = 800  # เก็บ 800 ตัวแรก (เพื่อดูบริบทการเริ่มรัน)
+    tail_size = 1500  # เก็บ 1500 ตัวสุดท้าย (สำคัญที่สุด: เพื่อดู Error message)
+
+    return (
+        f"{text[:head_size]}\n\n"
+        f"--- [ ✂️ TRUNCATED {len(text) - (head_size + tail_size)} CHARS ✂️ ] ---\n\n"
+        f"{text[-tail_size:]}"
+    )
+
 # ==============================================================================
 # 🛠️ SANDBOX TOOLS
 # ==============================================================================
@@ -293,13 +307,15 @@ def run_sandbox_command(command: str, cwd: str = None, timeout: int = 300) -> st
         output = result.stdout.strip()
         error = result.stderr.strip()
 
+        # --- แทนที่ในส่วนแสดงผลเดิม ---
+        clean_output = truncate_middle(output)
+        clean_error = truncate_middle(error)
+
         if result.returncode == 0:
-            # ถ้า output ยาวเกินไป ตัดให้สั้นลงหน่อย (Optional)
-            if len(output) > 2000:
-                return f"✅ Command Success:\n{output[:2000]}\n... [Output Truncated]"
-            return f"✅ Command Success:\n{output}"
+            return f"✅ Command Success:\n{clean_output}"
         else:
-            return f"❌ Command Failed (Exit Code {result.returncode}):\n{output}\nERROR LOG:\n{error}"
+            # ในเคสพัง เราต้องแสดงทั้ง output และ error log ที่ตัดแล้ว
+            return f"❌ Command Failed (Exit Code {result.returncode}):\n{clean_output}\nERROR LOG:\n{clean_error}"
 
     except subprocess.TimeoutExpired:
         return f"⏰ Command Timeout! (Over {timeout}s)."
@@ -572,11 +588,23 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                     task_mode = args.get("mode", "code").lower()
                     validation_error = None
                     workspace = settings.AGENT_WORKSPACE
+                    # 1. ลองเช็คดูว่ามีไฟล์อะไรที่ควรจะถูกลบ (Dry Run)
+                    clean_preview = run_sandbox_command("git clean -nd", cwd=workspace)
 
-                    # 1. Check Uncommitted Changes
+                    # 2. เช็คสถานะ Git แบบละเอียด
                     status = run_sandbox_command("git status --porcelain", cwd=workspace)
+
                     if status.strip():
-                        validation_error = "❌ REJECTED: You have uncommitted changes. Please commit or discard them before finishing."
+                        # ❌ ส่ง "หลักฐาน" ทั้งหมดกลับไปมัดตัว Agent
+                        error_msg = (
+                            "❌ FATAL: WORKSPACE IS DIRTY.\n"
+                            "I found untracked/uncommitted files. You must clean them or commit them.\n\n"
+                            f"--- [Git Porcelain Output] ---\n'{status}'\n\n"
+                            f"--- [Suggested Cleanup (git clean -nd)] ---\n{clean_preview}\n\n"
+                            "👉 ACTION: Use 'git add .' then commit, or manually 'rm' the files above."
+                        )
+                        history.append({"role": "user", "content": error_msg})
+                        continue
 
                     # 2. Verify Work (Mode Based)
                     if not validation_error:
