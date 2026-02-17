@@ -16,9 +16,9 @@ def allowed_gai_family():
 connection.allowed_gai_family = allowed_gai_family
 
 # 3. 🎯 ตั้งค่าเป้าหมาย
-base_url = "https://ku5rp3pvihdvb3-11434.proxy.runpod.net"
+base_url = "https://im2uvc1m0i6je7-11434.proxy.runpod.net"
 chat_url = f"{base_url}/api/chat"
-model_name = "qwen2.5-coder:32b"  # เอาชื่อมาจากที่คุณเช็คเจอเมื่อกี้
+model_name = "qwen32k"  # เอาชื่อมาจากที่คุณเช็คเจอเมื่อกี้
 
 # 4. 🎭 หน้ากาก Chrome (ห้ามลืม!)
 headers = {
@@ -35,7 +35,12 @@ payload = {
     "messages": [
         {"role": "user", "content": "Hello! Are you ready to work?"}
     ],
-    "stream": False  # ขอคำตอบรวดเดียวจบ
+    "stream": False,  # ขอคำตอบรวดเดียวจบ
+    "options": {
+                # "num_ctx": 4096,
+                "num_ctx": 32000,
+                "num_predict": -1
+            }
 }
 
 print(f"🚀 Sending Message to: {chat_url}")

@@ -1,16 +1,19 @@
+import sys
 import json
 import logging
 import re
 import os
-import sys
 import ast
+import uuid
+from datetime import datetime
 from typing import Dict, Any, List
+import core.network_fix
 
 # ✅ Core Configuration & LLM
 from core.config import settings
 from core.llm_client import query_qwen
 
-# ✅ Core Tools (ใช้ตัวใหม่)
+# ✅ Core Tools
 from core.tools.jira_ops import get_jira_issue
 from core.tools.file_ops import read_file, list_files
 from core.tools.git_ops import git_setup_workspace, git_commit, git_push, create_pr, git_pull
@@ -21,6 +24,29 @@ logger = logging.getLogger("Athena")
 
 
 # ==============================================================================
+# 📝 DUAL LOGGER CLASS
+# ==============================================================================
+class DualLogger:
+    """Writes output to BOTH the terminal (stdout) and a log file simultaneously."""
+
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log_file = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
+
+
+# ==============================================================================
 # 🛠️ AGENT SPECIFIC TOOLS
 # ==============================================================================
 
@@ -28,12 +54,12 @@ def save_test_design(filename: str, content: str) -> str:
     """Saves Test Scenarios (CSV) to the QA Repo."""
     try:
         if not filename.endswith('.csv'): filename += ".csv"
-        # ใช้ Path จาก settings หรือจะใช้ workspace ก็ได้ แต่แยก folder ไว้ก็ดี
+
+        # ✅ FIX 1: ใช้ path เดิมตามที่ระบุ (settings.TEST_DESIGN_DIR)
         target_dir = settings.TEST_DESIGN_DIR
         full_path = os.path.join(target_dir, filename)
 
-        # ตรวจสอบว่า target_dir อยู่ใน workspace หรือไม่ ถ้าไม่ อาจต้องปรับ path
-        # กรณีนี้สมมติว่า TEST_DESIGN_DIR ถูก set ไว้ถูกต้องใน config แล้ว
+        # สร้าง folder หากยังไม่มี
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
         # Clean logic: Remove markdown code blocks
@@ -51,6 +77,10 @@ def save_test_design(filename: str, content: str) -> str:
         return f"❌ Error Saving CSV: {e}"
 
 
+# ==============================================================================
+# 🧩 TOOL REGISTRY & SCHEMAS (Added)
+# ==============================================================================
+
 TOOLS = {
     "get_jira_issue": get_jira_issue,
     "list_files": list_files,
@@ -59,22 +89,97 @@ TOOLS = {
     "git_commit": git_commit,
     "git_push": git_push,
     "create_pr": create_pr,
-    "git_pull": git_pull,  # ✅ เพิ่ม git_pull เข้าไปใน TOOLS ด้วย เผื่อ AI เรียกใช้ตอนแก้ conflict
+    "git_pull": git_pull,
     "save_test_design": save_test_design
 }
 
+# ✅ FIX 2: เพิ่ม Schema Verification เหมือน Hephaestus
+TOOL_SCHEMAS = {
+    "get_jira_issue": {
+        "required": ["issue_key"],
+        "description": "Fetches details of a JIRA issue."
+    },
+    "git_setup_workspace": {
+        "required": ["issue_key"],
+        "optional": ["base_branch", "agent_name", "job_id"],  # Injectable args
+        "description": "Clones repo and checks out branch."
+    },
+    "save_test_design": {
+        "required": ["filename", "content"],
+        "description": "Saves CSV content to the test design folder."
+    },
+    "git_commit": {
+        "required": ["message"],
+        "description": "Commits changes."
+    },
+    "git_push": {
+        "required": [],
+        "optional": ["branch_name"],
+        "description": "Pushes changes to remote."
+    },
+    "git_pull": {
+        "required": [],
+        "optional": ["branch_name"],
+        "description": "Pulls latest changes."
+    },
+    "create_pr": {
+        "required": ["title"],
+        "optional": ["body", "base_branch", "head_branch"],
+        "description": "Creates a GitHub Pull Request."
+    },
+    "list_files": {
+        "required": [],
+        "optional": ["directory"],
+        "description": "Lists files."
+    },
+    "read_file": {
+        "required": ["file_path"],  # ใช้ชื่อ argument ให้ตรงกับ function จริง
+        "description": "Reads file content."
+    },
+    "task_complete": {
+        "required": [],
+        "optional": ["summary"],
+        "description": "Marks task as finished."
+    }
+}
 
-def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> str:
-    if tool_name not in TOOLS: return f"Error: Unknown tool '{tool_name}'"
+
+def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_name not in TOOLS:
+        return {"success": False, "output": f"Error: Unknown tool '{tool_name}'"}
+
+    # ✅ Schema Validation Logic
+    if tool_name in TOOL_SCHEMAS:
+        schema = TOOL_SCHEMAS[tool_name]
+        valid_keys = set(schema.get("required", []))
+        if "optional" in schema:
+            valid_keys.update(schema["optional"])
+
+        # Check unknown args
+        unknown_args = set(args.keys()) - valid_keys
+        if unknown_args:
+            return {
+                "success": False,
+                "output": f"[ERROR] Invalid arguments: {list(unknown_args)}. Allowed: {list(valid_keys)}"
+            }
+
+        # Check missing args
+        missing = [k for k in schema.get("required", []) if k not in args]
+        if missing:
+            return {"success": False, "output": f"[ERROR] Missing required arguments: {missing}"}
+
     try:
         func = TOOLS[tool_name]
-        return str(func(**args))
+        raw_result = str(func(**args))
+        is_success = "✅" in raw_result or "SUCCESS" in raw_result.upper()
+        clean_output = raw_result.replace("✅", "[SUCCESS]").replace("❌", "[ERROR]")
+        return {"success": is_success, "output": clean_output}
     except Exception as e:
-        return f"Error executing {tool_name}: {e}"
+        return {"success": False, "output": f"Error executing {tool_name}: {str(e)}"}
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT (Strict Signature & Detachment)
+# 🧠 SYSTEM PROMPT
 # ==============================================================================
 CSV_BLOCK_START = "```" + "csv"
 CSV_BLOCK_END = "```"
@@ -138,14 +243,39 @@ RESPONSE FORMAT (JSON ONLY + MARKDOWN BLOCK):
 # ==============================================================================
 # 🧩 HELPER: ROBUST PARSERS
 # ==============================================================================
-def extract_code_block(text: str) -> str:
+
+def sanitize_json_input(raw_text):
+    """Cleans up the LLM response to ensure valid JSON."""
+    clean_text = re.sub(r'^```json\s*', '', raw_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE)
+
+    def fix_triple_quotes(match):
+        content = match.group(1).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+        return f'"{content}"'
+
+    clean_text = re.sub(r'"""(.*?)"""', fix_triple_quotes, clean_text, flags=re.DOTALL)
+
+    clean_text = clean_text.strip()
+
+    # Python Dict -> JSON Auto-Fix
+    try:
+        py_compatible_text = clean_text.replace("true", "True").replace("false", "False").replace("null", "None")
+        parsed = ast.literal_eval(py_compatible_text)
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(parsed)
+    except Exception:
+        pass
+
+    return clean_text
+
+
+def extract_csv_block(text: str) -> str:
     """Extract CSV content precisely."""
-    # 1. Look for explicit CSV tag
     csv_matches = re.findall(r"```csv\n(.*?)```", text, re.DOTALL)
     if csv_matches:
         return csv_matches[-1].strip()
 
-    # 2. Fallback: Find any non-JSON block
     matches = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     for content in reversed(matches):
         cleaned = content.strip()
@@ -171,7 +301,6 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
         except:
             pos += 1
 
-    # ✅ Robust Fallback: Handle Python dicts (Single quotes)
     if not results:
         try:
             matches = re.findall(r"(\{.*?\})", text, re.DOTALL)
@@ -184,99 +313,128 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
                     continue
         except:
             pass
-
     return results
 
 
 # ==============================================================================
 # 🚀 MAIN LOOP
 # ==============================================================================
-def run_athena_task(task: str, max_steps: int = 20):
-    # Enforce Identity
+def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
     if settings.CURRENT_AGENT_NAME != "Athena":
         settings.CURRENT_AGENT_NAME = "Athena"
 
-    print(f"🦉 Launching Athena (Test Architect)...")
-    print(f"🆔 Identity: {settings.CURRENT_AGENT_NAME}")
-    print(f"📂 Workspace: {settings.AGENT_WORKSPACE}")
-    print(f"📋 Task: {task}")
+    if not job_id:
+        job_id = f"qa_{uuid.uuid4().hex[:8]}"
 
-    history = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": task}
-    ]
+    # --- Path Setup ---
+    current_script_path = os.path.abspath(__file__)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_script_path)))
+    logs_dir = os.path.join(project_root, "logs", "athena")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_filename = os.path.join(logs_dir, f"job_{job_id}.log")
 
-    for step in range(max_steps):
-        print(f"\n🔄 Thinking (Step {step + 1})...")
-        try:
-            response = query_qwen(history)
-            if isinstance(response, dict):
-                content = response.get('message', {}).get('content', '') or response.get('content', '')
-            else:
-                content = str(response)
-        except Exception as e:
-            print(f"❌ Error querying LLM: {e}")
-            return
+    # Setup Dual Logger
+    original_stdout = sys.stdout
+    dual_logger = DualLogger(log_filename)
+    sys.stdout = dual_logger
 
-        print(f"🤖 Athena: {content[:100]}...")
+    try:
+        print(f"\n==================================================")
+        print(f"🦉 Launching Athena (Test Architect)...")
+        print(f"▶️ [Worker] Starting Job {job_id}")
+        print(f"📅 Time: {datetime.now()}")
+        print(f"📋 Task: {task}")
+        print(f"📁 Log File: {os.path.abspath(log_filename)}")
+        print(f"==================================================\n")
 
-        tool_calls = _extract_all_jsons(content)
+        history = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": task}
+        ]
 
-        if not tool_calls:
-            if "complete" in content.lower():
-                print("ℹ️ Athena finished thinking.")
-            history.append({"role": "assistant", "content": content})
-            continue
+        for step in range(max_steps):
+            print(f"\n🔄 Thinking (Step {step + 1})...")
+            try:
+                response = query_qwen(history)
+                if isinstance(response, dict):
+                    content = response.get('message', {}).get('content', '') or response.get('content', '')
+                else:
+                    content = str(response)
+            except Exception as e:
+                print(f"❌ Error querying LLM: {e}")
+                return
 
-        step_outputs = []
-        task_finished = False
+            print(f"🤖 Athena: {content[:100]}...")
 
-        for tool_call in tool_calls:
-            action = tool_call.get("action")
-            args = tool_call.get("args", {})
+            # Clean and Extract
+            content_cleaned = sanitize_json_input(content)
+            tool_calls = _extract_all_jsons(content_cleaned)
 
-            if action == "task_complete":
-                task_finished = True
-                result = args.get("summary", "Done")
-                step_outputs.append(f"Task Completed: {result}")
-                break
-
-            if action not in TOOLS:
-                step_outputs.append(f"❌ Error: Tool '{action}' not found.")
+            if not tool_calls:
+                if "complete" in content.lower() or "completed" in content.lower():
+                    print("ℹ️ Athena likely finished thinking.")
+                history.append({"role": "assistant", "content": content})
                 continue
 
-            # ⚡ Content Detachment Logic (Stitching)
-            if action == "save_test_design":
-                if "content" not in args or len(args["content"]) < 10:
-                    csv_content = extract_code_block(content)
-                    if csv_content:
-                        args["content"] = csv_content
-                        print("📝 Extracted CSV from Markdown block.")
-                    else:
-                        print("⚠️ Warning: No CSV content found.")
-                        step_outputs.append("Error: CSV content missing from Markdown block.")
-                        continue
+            step_outputs = []
+            task_finished = False
 
-            print(f"🔧 Executing: {action}")
-            result = execute_tool_dynamic(action, args)
+            # Execute Tools
+            for tool_call in tool_calls:
+                action = tool_call.get("action")
+                args = tool_call.get("args", {})
 
-            display_result = result
-            if action == "save_test_design":
-                display_result = f"✅ CSV Saved: {args.get('filename')}"
+                if action == "task_complete":
+                    task_finished = True
+                    result_summary = args.get("summary", "Done")
+                    step_outputs.append(f"Task Completed: {result_summary}")
+                    break
 
-            print(
-                f"📄 Result: {display_result[:300]}..." if len(display_result) > 300 else f"📄 Result: {display_result}")
-            step_outputs.append(f"Tool Output ({action}): {result}")
-            break
+                # --- 💉 MIDDLEWARE INJECTION (System Overrides) ---
+                if action == "git_setup_workspace":
+                    args["job_id"] = job_id
+                    current_agent = getattr(settings, "CURRENT_AGENT_NAME", "Athena")
+                    args["agent_name"] = current_agent
+                    print(f"💉 System Injected: agent_name='{current_agent}', job_id='{job_id}'")
 
-        if task_finished:
-            print(f"\n✅ DESIGN COMPLETE: {result}")
-            return result
+                # ⚡ Content Detachment Logic (CSV Stitching)
+                if action == "save_test_design":
+                    if "content" not in args or len(args.get("content", "")) < 10:
+                        csv_content = extract_csv_block(content)
+                        if csv_content:
+                            args["content"] = csv_content
+                            print("📝 Extracted CSV from Markdown block.")
+                        else:
+                            print("⚠️ Warning: No CSV content found in markdown.")
+                            step_outputs.append("Error: CSV content missing from Markdown block.")
+                            continue
 
-        history.append({"role": "assistant", "content": content})
-        history.append({"role": "user", "content": "\n".join(step_outputs)})
+                print(f"🔧 Executing: {action}")
 
-    print("❌ FAILED: Max steps reached.")
+                # Execute with Schema Validation
+                res_data = execute_tool_dynamic(action, args)
+                result_for_ai = res_data["output"]
+
+                print(f"📄 Result: {str(result_for_ai)[:300]}...")
+                step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
+
+                # Prevent batching logic (Athena usually does 1 thing at a time)
+                break
+
+            if task_finished:
+                print(f"\n✅ DESIGN COMPLETE.")
+                return
+
+            history.append({"role": "assistant", "content": content})
+            history.append({"role": "user", "content": "\n".join(step_outputs)})
+
+        print("❌ FAILED: Max steps reached.")
+
+    finally:
+        if 'original_stdout' in locals():
+            sys.stdout = original_stdout
+        if 'dual_logger' in locals():
+            dual_logger.close()
 
 
 if __name__ == "__main__":

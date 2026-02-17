@@ -1,5 +1,6 @@
 import sys
 import os
+import core.network_fix
 
 # 1. Setup Path ให้ Python มองเห็น folder 'core' และ 'agents'
 sys.path.append(os.getcwd())

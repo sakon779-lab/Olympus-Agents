@@ -5,6 +5,7 @@ import os
 import sys
 import subprocess
 from typing import Dict, Any, List
+import core.network_fix
 
 # ✅ Core Configuration & LLM
 from core.config import settings

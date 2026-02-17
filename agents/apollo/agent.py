@@ -4,7 +4,9 @@ import re
 import os
 import sys
 import ast
+import time
 from typing import Dict, Any, List
+import core.network_fix
 
 # ✅ Core Modules (Lightweight Imports)
 from core.llm_client import query_qwen
@@ -16,63 +18,76 @@ logger = logging.getLogger("ApolloAgent")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 
+# ✅ Reuse Parser Logic (ดึงออกมาเป็น Global Helper)
+def robust_json_parser(text: str) -> Dict[str, Any]:
+    """ พยายามแกะ JSON หรือ Python Dict จาก Text ให้ได้ """
+    # 1. ลองใช้ Parser ตัวเก่งของคุณ _extract_all_jsons
+    extracted = _extract_all_jsons(text)
+    if extracted:
+        return extracted[0]  # เอาตัวแรกที่เจอ
+
+    # 2. ถ้าไม่เจอ ลองท่าไม้ตาย clean string
+    try:
+        clean = text.strip()
+        if clean.startswith("```json"): clean = clean[7:]
+        if clean.startswith("```"): clean = clean[3:]
+        if clean.endswith("```"): clean = clean[:-3]
+        return json.loads(clean.strip())
+    except:
+        return {}
+
 # ==============================================================================
 # 🛠️ APOLLO SPECIFIC TOOLS
 # ==============================================================================
+
+# 🟢 Global Cache สำหรับ DB Connection (แก้ปัญหา Connect บ่อย)
+_CACHED_DB = None
+
+def get_db_connection():
+    global _CACHED_DB
+    if _CACHED_DB is None:
+        from langchain_community.utilities import SQLDatabase
+        # include_tables=['users', 'tickets'] # 💡 แนะนำ: ระบุเฉพาะตารางที่จำเป็นถ้า DB ใหญ่
+        _CACHED_DB = SQLDatabase.from_uri(
+            settings.DATABASE_URI,
+            sample_rows_in_table_info=0,
+            include_tables=['jira_knowledge'] # <--- กำหนดขอบเขตตั้งแต่ตรงนี้
+        )
+    return _CACHED_DB
+
 
 def ask_database_analyst(question: str) -> str:
     """
     Expert on Data & Statistics.
     Queries the live application database using SQL.
+    (Manual Execution with Advanced Prompting)
     """
-    # 🟢 [LAZY LOAD] โหลดของหนักเฉพาะตอนใช้ เพื่อแก้ปัญหา Server Start Timeout
     from langchain_community.utilities import SQLDatabase
-    from langchain_community.agent_toolkits import create_sql_agent
-    from core.llm_client import get_langchain_llm
+    from core.llm_client import query_qwen
+    import re
 
     logger.info(f"📊 Analyst querying: {question}")
 
     try:
-        # 1. Connect DB (On Demand)
-        # sample_rows_in_table_info=0 เพื่อลดเวลาโหลด Schema
-        app_db = SQLDatabase.from_uri(settings.DATABASE_URI, sample_rows_in_table_info=0)
+        # 1. Connect DB
+        # ใส่ include_tables=['...'] ถ้าต้องการลดขนาด Schema
+        app_db = get_db_connection()
 
-        # 🟢 [NEW] 1.5 ดึง Schema ล่าสุดออกมาเป็น Text (Dynamic!)
-        # คำสั่งนี้จะวิ่งไปอ่าน Postgres ว่ามีตารางอะไรบ้าง + Column อะไรบ้าง
-        # แล้วแปลงเป็น String (CREATE TABLE...) ให้เรา
+        # 2. ดึง Schema
         database_schema = app_db.get_table_info()
 
-        # 2. Setup Agent
-        agent_llm = get_langchain_llm(temperature=0)
-        sql_agent_executor = create_sql_agent(
-            llm=agent_llm,
-            db=app_db,
-            agent_type="zero-shot-react-description",
-            verbose=True,  # เปิด True ช่วย debug ใน console (แต่อย่า print ออก stdout ของ server)
-            # ✅ เพิ่ม Custom Error Message เวลา AI เอ๋อ
-            # ✅ ปรับ Error Handling ให้บอกวิธีแก้ Format ทันที
-            handle_parsing_errors=(
-                "❌ FORMAT ERROR: You forgot to specify the tool! "
-                "You MUST output 'Action: sql_db_query' before the 'Action Input'. "
-                "Try again!"
-                "❌ SYNTAX ERROR: You probably used Markdown code blocks (```sql). "
-                "Please Output RAW SQL only. Do NOT wrap it in backticks."
-            )
-        )
-
-        # 3. Dynamic Prompt (บังคับให้คิดก่อนทำ)
+        # 3. 🔥 Setup Prompt (ตามที่คุณขอมาเป๊ะๆ)
         forced_prompt = (
             f"Role: You are an Intelligent SQL Data Analyst.\n"
             f"Goal: Answer the user's question accurately using the PostgreSQL database.\n\n"
             f"⚡ **LIVE DATABASE SCHEMA**:\n"
-            f"{database_schema}\n\n"  # <--- 🟢 ยัด Schema ของจริงใส่ตรงนี้เลย!
+            f"{database_schema}\n\n"
             f"⚠️ **CRITICAL INSTRUCTIONS**:\n"
-            f"1. **Tools**: You have access to tools like `sql_db_query`, `sql_db_schema`, etc.\n"
-            f"   - Since the schema is provided above, you usually just need `sql_db_query`.\n"
+            f"1. **Output**: You MUST output the SQL query in the 'Action Input' field.\n"
             f"2. **Format**: You MUST use the standard ReAct format:\n"
             f"   Thought: [Your reasoning]\n"
-            f"   Action: [Tool Name] (or 'Final Answer' if done)\n"
-            f"   Action Input: [SQL Query or Answer Text]\n"
+            f"   Action: sql_db_query\n"
+            f"   Action Input: [SQL Query ONLY]\n"
             f"3. **No Chatting**: Do not start with 'Here is the query'. Start directly with 'Thought:'.\n\n"
             f"4. **NO MARKDOWN**: Do NOT wrap the SQL in ```sql ... ``` or ` ... `. \n"
             f"   - ❌ WRONG: ```sql SELECT * FROM table ``` \n"
@@ -81,19 +96,65 @@ def ask_database_analyst(question: str) -> str:
             f"1. **Analyze Intent**: Does the user want to Count? List? Sum? or Check details?\n"
             f"2. **Identify Table**: Look for the most relevant table based on keywords.\n"
             f"3. **Inspect Data (Crucial)**: Run `SELECT DISTINCT column FROM table LIMIT 10` first if filtering by text.\n"
-            f"4. **Execute Final Query**: Execute specific SQL.\n\n"
+            f"4. **Execute Final Query**: Generate the specific SQL.\n\n"
             f"Question: {question}\n\n"
-            # 🔥 Pre-fill แค่จุดเริ่มต้น เพื่อกระตุ้นให้เข้า Format (แต่ไม่บังคับ Action)
             f"Let's think step by step.\n"
-            f"Thought:"
         )
 
-        result = sql_agent_executor.invoke(forced_prompt)
-        output = result.get('output', str(result))
-        return f"📊 Database Analysis Result:\n{output}"
+        messages = [
+            {"role": "user", "content": forced_prompt}
+        ]
+
+        # 4. ให้ AI คิด (ใช้ query_qwen ที่เสถียร)
+        logger.info("🤖 Generating SQL Plan...")
+        raw_response = query_qwen(messages, temperature=0.1)
+
+        # 5. 🔍 Parser: แกะ SQL ออกมาจาก ReAct Format
+        # เราต้องเขียน Logic แกะเองเพราะไม่ได้ใช้ LangChain Agent Executor แล้ว
+        sql_query = ""
+
+        # พยายามหาบรรทัด Action Input:
+        match = re.search(r"Action Input:\s*(.*)", raw_response, re.DOTALL | re.IGNORECASE)
+        if match:
+            sql_query = match.group(1).strip()
+        else:
+            # Fallback: ถ้าหา Action Input ไม่เจอ ให้ลองหาคำว่า SELECT
+            logger.warning("⚠️ ReAct format mismatch, trying to find raw SQL...")
+            sql_matches = re.findall(r"(SELECT\s.*)", raw_response, re.DOTALL | re.IGNORECASE)
+            if sql_matches:
+                sql_query = sql_matches[-1]  # เอาตัวสุดท้ายที่น่าจะเป็นคำตอบ
+            else:
+                return f"❌ Could not extract SQL from response:\n{raw_response}"
+
+        # 6. Cleaning (เผื่อ AI ดื้อใส่ Markdown มา)
+        if "```" in sql_query:
+            sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+
+        # ลบ comment ท้ายบรรทัด (ถ้ามี)
+        sql_query = sql_query.split(";")[0]
+
+        logger.info(f"🚀 Executing SQL: {sql_query}")
+
+        # 7. รัน SQL จริง
+        try:
+            result_str = app_db.run(sql_query)
+
+            # จัด Format คำตอบให้สวยงาม
+            final_output = (
+                f"📊 **Database Analysis Result**:\n"
+                f"--------------------------------\n"
+                f"🧠 **Thought**: {raw_response.split('Action')[0].replace('Thought:', '').strip()}\n"
+                f"💻 **Query**: `{sql_query}`\n"
+                f"✅ **Answer**: {result_str}"
+            )
+            return final_output
+
+        except Exception as sql_err:
+            return f"❌ SQL Execution Error: {sql_err}\nQuery was: {sql_query}"
 
     except Exception as e:
-        return f"❌ SQL Analyst Error: {e}"
+        logger.error(f"❌ Critical Analyst Error: {e}")
+        return f"❌ System Error: {e}"
 
 
 def ask_guru(question: str) -> str:
@@ -195,7 +256,7 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         content_text = content_text.strip()
 
         # แปลงเป็น Dict
-        data = json.loads(content_text)
+        data = robust_json_parser(content_text)
 
         # Helper Serialize
         def safe_serialize(obj):
