@@ -6,6 +6,55 @@ from core.config import settings
 logger = logging.getLogger("JiraOps")
 
 
+def get_recently_updated_issues(hours: int = 24) -> list:
+    """
+    กวาดรายชื่อ Issue Key ที่มีการอัปเดตในช่วง N ชั่วโมงที่ผ่านมา โดยใช้ JQL
+    """
+    # 1. สร้าง JQL: ค้นหา Ticket ที่ updated >= -Nh และเรียงจากใหม่ไปเก่า
+    jql = f'updated >= "-{hours}h" ORDER BY updated DESC'
+
+    url = f"{settings.JIRA_URL}/rest/api/3/search/jql"
+    auth = HTTPBasicAuth(settings.JIRA_EMAIL, settings.JIRA_API_TOKEN)
+    # ✅ ใช้ Headers ที่เรียบง่ายที่สุด (ไม่ต้องมี Content-Type เพราะไม่ได้ส่ง body)
+    jira_headers = {
+        "Accept": "application/json"
+    }
+
+    # ✅ ส่งข้อมูลผ่าน Parameters (query string) แทน JSON payload
+    params = {
+        "jql": jql,
+        "maxResults": 50,
+        "fields": "key"
+    }
+
+    try:
+        logger.info(f"🔎 Scanning Jira updates (Last {hours} hours) with JQL: {jql}")
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=jira_headers,
+            auth=auth,
+            verify=False
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            issues = data.get('issues', [])
+
+            # ดึงเฉพาะ key ออกมาเป็น list [ "SCRUM-20", "SCRUM-21", ... ]
+            issue_keys = [issue.get('key') for issue in issues if issue.get('key')]
+
+            logger.info(f"✅ Found {len(issue_keys)} updated tickets: {issue_keys}")
+            return issue_keys
+        else:
+            logger.error(f"❌ Failed to search Jira. Status: {response.status_code}, Response: {response.text}")
+            return []
+
+    except Exception as e:
+        logger.error(f"❌ Exception during Jira search: {e}")
+        return []
+
 def get_jira_issue(issue_key: str) -> dict:
     """
     Fetches ALL details of a Jira ticket in one go.

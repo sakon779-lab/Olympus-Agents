@@ -43,12 +43,14 @@ load_dotenv(os.path.join(project_root, ".env"))
 
 # 3. Import Functions
 try:
-    from agents.apollo.agent import ask_guru, ask_database_analyst, sync_ticket_to_knowledge_base
-    # ใช้ print ได้เลย เพราะเรา Patch ให้ลง stderr แล้ว
-    print("✅ [DEBUG] Apollo Agent imported successfully.")
+    from agents.apollo.agent import (
+        ask_guru,
+        ask_database_analyst,
+        sync_ticket_to_knowledge_base,
+        sync_recent_tickets # ✅ เพิ่มตัวนี้เข้ามา
+    )
 except ImportError as e:
-    print(f"❌ [DEBUG] Error importing Apollo: {e}")
-    sys.exit(1)
+    print(f"❌ [DEBUG] Error importing Apollo components: {e}")
 
 # 4. Create Server
 mcp = FastMCP("Olympus - Apollo")
@@ -72,22 +74,27 @@ def redirect_stdout_to_stderr():
 # ==============================================================================
 # 👷 WORKER: คนทำงานเบื้องหลัง
 # ==============================================================================
-def background_sync_worker(job_id: str, issue_key: str):
-    """รันงาน Sync Jira ใน Thread แยก"""
-    sys.stderr.write(f"▶️ [Worker] Starting Sync Job {job_id} for {issue_key}\n")
 
+
+# 👷 อัปเกรด Worker ให้รองรับงานหลายประเภท
+def background_worker(job_id: str, action_type: str, args: dict):
+    """Worker อเนกประสงค์สำหรับงาน Async"""
+    sys.stderr.write(f"▶️ [Worker] Starting {action_type} Job {job_id}\n")
     JOBS[job_id]["status"] = "RUNNING"
-    JOBS[job_id]["log"] = "Synchronizing..."
 
     try:
-        # Redirect stdout -> stderr เพื่อกัน JSON พัง
         with redirect_stdout_to_stderr():
-            # เรียกฟังก์ชันหลักของ Agent
-            result = sync_ticket_to_knowledge_base(issue_key)
+            if action_type == "sync_ticket":
+                result = sync_ticket_to_knowledge_base(args['issue_key'])
+            elif action_type == "sync_recent":
+                # ✅ เรียกฟังก์ชัน sync ตามช่วงเวลาที่เราคุยกัน
+                result = sync_recent_tickets(args['hours'])
+            else:
+                result = "Unknown Action"
 
         JOBS[job_id]["status"] = "COMPLETED"
         JOBS[job_id]["result"] = result
-        sys.stderr.write(f"✅ [Worker] Job {job_id} Finished.\n")
+        sys.stderr.write(f"✅ [Worker] Job {job_id} ({action_type}) Finished.\n")
 
     except Exception as e:
         JOBS[job_id]["status"] = "FAILED"
@@ -131,7 +138,7 @@ def sync_jira_ticket(issue_key: str) -> str:
     }
 
     # Fire Thread
-    thread = threading.Thread(target=background_sync_worker, args=(job_id, issue_key))
+    thread = threading.Thread(target=background_worker, args=(job_id, issue_key))
     thread.daemon = True
     thread.start()
 
@@ -163,6 +170,36 @@ def check_job_status(job_id: str) -> str: # 🟢 [FIX 2] เพิ่ม Tool �
         return f"❌ Job {job_id} FAILED.\nError: {job.get('error')}"
 
     return f"Job {job_id} status: {status}"
+
+
+@mcp.tool()
+def sync_recent_updates(hours: int = 24) -> str:
+    """
+    Sync all Jira tickets updated within the last N hours (ASYNC).
+    Use this to refresh the entire knowledge base for a specific period.
+    """
+    job_id = f"batch-{str(uuid.uuid4())[:6]}"
+
+    JOBS[job_id] = {
+        "type": "sync_recent",
+        "hours": hours,
+        "status": "PENDING",
+        "start_time": time.strftime("%H:%M:%S")
+    }
+
+    # ส่งงานเข้า Background Thread
+    thread = threading.Thread(
+        target=background_worker,
+        args=(job_id, "sync_recent", {"hours": hours})
+    )
+    thread.daemon = True
+    thread.start()
+
+    return (
+        f"🔄 Batch Sync Started! Job ID: {job_id}\n"
+        f"Scanning updates for the last {hours} hours...\n"
+        f"Use `check_job_status('{job_id}')` to see the summary of synced tickets."
+    )
 
 # 5. Run Server
 if __name__ == "__main__":

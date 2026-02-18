@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [A
 logger = logging.getLogger("ApolloAgent")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-
 # ✅ Reuse Parser Logic (ดึงออกมาเป็น Global Helper)
 def robust_json_parser(text: str) -> Dict[str, Any]:
     """ พยายามแกะ JSON หรือ Python Dict จาก Text ให้ได้ """
@@ -54,6 +53,34 @@ def get_db_connection():
             include_tables=['jira_knowledge'] # <--- กำหนดขอบเขตตั้งแต่ตรงนี้
         )
     return _CACHED_DB
+
+
+def sync_recent_tickets(hours: int = 24) -> str:
+    """
+    Automatically syncs tickets that were updated within the last N hours.
+    Useful for keeping the knowledge base fresh.
+    """
+    # 🟢 [LAZY LOAD]
+    from core.tools.jira_ops import get_recently_updated_issues
+    logger.info(f"🔄 Apollo starting batch sync for the last {hours} hours...")
+
+    # 1. ไปดึง Keys มา
+    issue_keys = get_recently_updated_issues(hours)
+
+    if not issue_keys:
+        return f"✅ No tickets were updated in the last {hours} hours. Everything is up to date!"
+
+    # 2. วนลูป Sync ทีละตัว (ใช้ function sync_ticket เดิมที่มีอยู่)
+    sync_results = []
+    for key in issue_keys:
+        try:
+            status = sync_ticket_to_knowledge_base(key)
+            sync_results.append(f"- {key}: {status}")
+        except Exception as e:
+            logger.error(f"❌ Failed to sync {key}: {e}")
+            sync_results.append(f"- {key}: FAILED (Error: {str(e)})")
+
+    return f"🚀 Sync Complete for the last {hours}h:\n" + "\n".join(sync_results)
 
 
 def ask_database_analyst(question: str) -> str:
@@ -305,7 +332,8 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
 TOOLS = {
     "ask_guru": ask_guru,
     "ask_database_analyst": ask_database_analyst,
-    "sync_ticket": sync_ticket_to_knowledge_base
+    "sync_ticket": sync_ticket_to_knowledge_base,
+    "sync_recent_tickets": sync_recent_tickets # ✅ เพิ่มน้องเข้าไป
 }
 
 
@@ -338,8 +366,13 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
    - Examples: "Sync SCRUM-27", "Read this ticket".
    - ✅ ACTION: Use `sync_ticket(issue_key)`.
 
+4. **CASE: User wants to UPDATE/REFRESH KNOWLEDGE by TIME** 🔄
+   - Examples: "Update tickets from today", "Sync last 5 hours", "Refresh knowledge base".
+   - ✅ ACTION: Use `sync_recent_tickets(hours)`.
+
 *** ⚠️ RULES ***
 - Do NOT guess. If you need stats, ask the analyst.
+- If the user doesn't specify hours for "sync today" or "sync recent", assume hours=24.
 - If you need content, ask the guru.
 - Output JSON format only.
 
@@ -348,10 +381,11 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 2. **JSON FORMAT**: No comments. Strict JSON.
 
 *** 🛠️ TOOLS AVAILABLE ***
-- sync_ticket(issue_key)
-- ask_guru(question)
-- ask_database_analyst(question)
-- task_complete(summary)
+- sync_ticket(issue_key): Syncs one specific Jira ticket.
+- sync_recent_tickets(hours): Scans and syncs all tickets updated within the last N hours.
+- ask_guru(question): Search internal knowledge/vector DB for logic and business rules.
+- ask_database_analyst(question): Executes SQL queries for statistics and counts.
+- task_complete(summary): Final answer after all actions are done.
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
