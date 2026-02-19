@@ -317,7 +317,7 @@ def _extract_all_jsons(text: str) -> List[Dict[str, Any]]:
 
 
 # ==============================================================================
-# 🚀 MAIN LOOP
+# 🚀 MAIN LOOP (Athena Version)
 # ==============================================================================
 def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
     if settings.CURRENT_AGENT_NAME != "Athena":
@@ -337,6 +337,8 @@ def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
     original_stdout = sys.stdout
     dual_logger = DualLogger(log_filename)
     sys.stdout = dual_logger
+
+    final_result = None  # สำหรับเก็บผลลัพธ์สุดท้ายส่งคืน Worker
 
     try:
         print(f"\n==================================================")
@@ -362,9 +364,9 @@ def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
                     content = str(response)
             except Exception as e:
                 print(f"❌ Error querying LLM: {e}")
-                return
+                return "Error: LLM Query Failed"
 
-            print(f"🤖 Athena: {content[:100]}...")
+            print(f"🤖 Athena: {content[:100].replace(os.linesep, ' ')}...")
 
             # Clean and Extract
             content_cleaned = sanitize_json_input(content)
@@ -372,7 +374,7 @@ def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
 
             if not tool_calls:
                 if "complete" in content.lower() or "completed" in content.lower():
-                    print("ℹ️ Athena likely finished thinking.")
+                    print("ℹ️ Athena likely finished thinking without explicit tool call.")
                 history.append({"role": "assistant", "content": content})
                 continue
 
@@ -384,9 +386,15 @@ def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
                 action = tool_call.get("action")
                 args = tool_call.get("args", {})
 
+                # ✅ แก้ไขจุดที่ทำให้ Result เป็น None
                 if action == "task_complete":
                     task_finished = True
-                    result_summary = args.get("summary", "Done")
+                    # ถ้า AI ส่ง args ว่างมา ให้พยายามดึง content ก่อนหน้ามาเป็น summary
+                    result_summary = args.get("summary") or args.get("result")
+                    if not result_summary:
+                        result_summary = "Task completed successfully (No explicit summary provided)."
+
+                    final_result = result_summary
                     step_outputs.append(f"Task Completed: {result_summary}")
                     break
 
@@ -418,17 +426,18 @@ def run_athena_task(task: str, job_id: str = None, max_steps: int = 25):
                 print(f"📄 Result: {str(result_for_ai)[:300]}...")
                 step_outputs.append(f"Tool Output ({action}): {result_for_ai}")
 
-                # Prevent batching logic (Athena usually does 1 thing at a time)
+                # Athena usually does 1 thing at a time
                 break
 
             if task_finished:
-                print(f"\n✅ DESIGN COMPLETE.")
-                return
+                print(f"\n✅ TASK COMPLETE.")  # 🟢 เปลี่ยนตามที่ขอ
+                return final_result  # 🟢 คืนค่าออกไปให้ Worker เก็บลง JOBS
 
             history.append({"role": "assistant", "content": content})
             history.append({"role": "user", "content": "\n".join(step_outputs)})
 
         print("❌ FAILED: Max steps reached.")
+        return "Failed: Maximum steps reached."
 
     finally:
         if 'original_stdout' in locals():

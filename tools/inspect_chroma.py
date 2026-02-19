@@ -3,8 +3,9 @@ import chromadb
 from chromadb.config import Settings
 
 # 1. ระบุ Path ของ ChromaDB (โฟลเดอร์ chroma_db ที่ Root)
-BASE_DIR = os.getcwd()
-CHROMA_PATH = os.path.join(BASE_DIR, "chroma_db")
+CURRENT_FILE_PATH = os.path.abspath(__file__)
+BASE_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_PATH))
+CHROMA_PATH = os.path.join( BASE_DIR, "chroma_db")
 
 print(f"📂 Opening ChromaDB at: {CHROMA_PATH}")
 
