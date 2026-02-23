@@ -174,6 +174,18 @@ def git_setup_workspace(issue_key: str, base_branch: str = "main", agent_name: s
             install_cmd = f'"{pip_cmd}" install --no-cache-dir -r requirements.txt'
             run_command(install_cmd, cwd=agent_workspace, timeout=600)
 
+        # ==========================================
+        # 🧹 PREPARE TMP DIRECTORY (Scratchpad)
+        # ==========================================
+        tmp_dir = os.path.join(agent_workspace, "tmp")
+
+        # ถ้ามีของเก่าจาก Job ที่แล้ว ให้ลบทิ้งให้เกลี้ยง
+        if os.path.exists(tmp_dir):
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+        os.makedirs(tmp_dir, exist_ok=True)
+
         return (f"✅ Workspace Ready!\n"
                 f"📂 Location: {agent_workspace}\n"
                 f"🌿 Branch: {feature_branch} (Based on origin/{base_branch})\n"

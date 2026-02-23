@@ -138,7 +138,10 @@ def sync_jira_ticket(issue_key: str) -> str:
     }
 
     # Fire Thread
-    thread = threading.Thread(target=background_worker, args=(job_id, issue_key))
+    thread = threading.Thread(
+        target=background_worker,
+        args=(job_id, "sync_ticket", {"issue_key": issue_key})
+    )
     thread.daemon = True
     thread.start()
 

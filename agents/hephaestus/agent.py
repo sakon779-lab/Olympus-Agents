@@ -128,7 +128,7 @@ This applies to write_file, append_file, and edit_file.
      3. Add your NEW code *below* the existing code.
      4. Use `write_file` with the *COMBINED* content (Old + New).
 
-3. **SDD (Spec-Driven)**: You MUST create `docs/specs.md` first.
+3. **SDD (Spec-Driven)**: You MUST create `tmp/specs.md` first.
 4. **TDD (Test-Driven)**: 🔴 Write failing test -> 🟢 Write code -> 🔵 Refactor.
 5. **STRICT ATOMICITY**: One JSON action per turn. Never batch commands.
 6. **NO HALLUCINATIONS**: If you didn't call `write_file`, the file wasn't created. Verify everything.
@@ -149,7 +149,7 @@ This applies to write_file, append_file, and edit_file.
 - **NO NESTED JSON BLOCKS**: When writing Markdown that contains JSON examples, DO NOT use triple backticks + json syntax inside the `write_file` content string. It breaks the parser.
   - ❌ BAD: "... {MD_QUOTE}json {{\\"key\\": \\"val\\"}} {MD_QUOTE} ..."
   - ✅ GOOD: "... Input: {{ key: val }} ..." (Use simplified text representation instead)
-- **RETRY STRATEGY**: If writing `docs/specs.md` fails, try writing a simpler version without complex formatting.
+- **RETRY STRATEGY**: If writing `tmp/specs.md` fails, try writing a simpler version without complex formatting.
 
 *** 🧹 CODE ARCHITECTURE RULE ***
 1. **SEPARATION OF CONCERNS**:
@@ -160,14 +160,18 @@ This applies to write_file, append_file, and edit_file.
    - Before using a class (e.g., `TestClient`), make sure you imported it (`from fastapi.testclient import TestClient`).
 3. **EXECUTION ORDER**:
    - Always define variables (e.g., `app = FastAPI()`) BEFORE using them.
+4. **DATABASE INITIALIZATION (CRITICAL)**:
+   - When creating a database initialization script (e.g., `init_db.py` or creating tables via SQLAlchemy), you MUST ensure the script actually executes the creation logic.
+   - ALWAYS include `if __name__ == "__main__":` and call the main function at the bottom of the script.
+   - DO NOT assume tables are created just because the script ran without errors. Always add print statements (e.g., `print("Tables created successfully")`) to verify execution.
 
 *** 🔄 WORKFLOW (STRICT ORDER) ***
 1. **PHASE 1: INIT**: `git_setup_workspace(issue_key)`. Memorize the branch.
-2. **PHASE 2: SPEC**: `get_jira_issue`. Write `docs/specs.md` (Mandatory).
+2. **PHASE 2: SPEC**: `get_jira_issue`. Write `tmp/specs.md` (Mandatory).
    - *Constraint*: Specs MUST include API Endpoint, JSON Schema (Req/Res), and Business Logic.
 3. **PHASE 3: EXPLORE**: `read_file` legacy `src/` and `tests/`.
 4. **PHASE 4: TDD CYCLE**: 
-   - `read_file("docs/specs.md")` to refresh context.
+   - `read_file("tmp/specs.md")` to refresh context.
    - Write failing test in `tests/`. Run `pytest` (Expect Fail).
    - Write/Update code in `src/`. Run `pytest` (Expect Pass).
 5. **PHASE 5: CONTAINERIZE**: 
@@ -977,8 +981,8 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
                 if action.endswith("_file"):
                     clean_target = target_file.replace("\\", "/")
                     # Filename Guardrail
-                    if clean_target.startswith("docs/") and clean_target != "docs/specs.md":
-                        msg = f"❌ FILENAME ERROR: Spec file MUST be named 'docs/specs.md'."
+                    if clean_target.startswith("docs/") and clean_target != "tmp/specs.md":
+                        msg = f"❌ FILENAME ERROR: Spec file MUST be named 'tmp/specs.md'."
                         step_outputs.append(msg)
                         history.append({"role": "assistant", "content": content})
                         history.append({"role": "user", "content": msg})
@@ -986,9 +990,9 @@ def run_hephaestus_task(task: str, job_id: str = None, max_steps: int = 45):
 
                     # Spec Guardrail
                     if clean_target.startswith("src/") or clean_target.startswith("tests/"):
-                        spec_path = os.path.join(settings.AGENT_WORKSPACE, "docs/specs.md")
+                        spec_path = os.path.join(settings.AGENT_WORKSPACE, "tmp/specs.md")
                         if not os.path.exists(spec_path):
-                            msg = "❌ POLICY VIOLATION: Write 'docs/specs.md' first."
+                            msg = "❌ POLICY VIOLATION: Write 'tmp/specs.md' first."
                             step_outputs.append(msg)
                             history.append({"role": "assistant", "content": content})
                             history.append({"role": "user", "content": msg})
