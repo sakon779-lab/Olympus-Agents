@@ -18,37 +18,37 @@ except ImportError:
     ChatOllama = None
 
 
-def get_langchain_llm(temperature: float = 0):
-    """
-    ✅ Factory Function: สร้าง LangChain Object
-    ใช้สำหรับ SQL Agent หรือ Tool ที่ต้องการ LangChain Inteface
-    """
-    if ChatOllama is None:
-        raise ImportError("❌ Please install 'langchain-ollama' to use this feature.")
+# def get_langchain_llm(temperature: float = 0):
+#     """
+#     ✅ Factory Function: สร้าง LangChain Object
+#     ใช้สำหรับ SQL Agent หรือ Tool ที่ต้องการ LangChain Inteface
+#     """
+#     if ChatOllama is None:
+#         raise ImportError("❌ Please install 'langchain-ollama' to use this feature.")
+#
+#     return ChatOllama(
+#         base_url=settings.OLLAMA_BASE_URL,
+#         model=settings.MODEL_NAME,
+#         temperature=temperature,
+#
+#         # 🟢 ย้าย config สำคัญมาไว้ในนี้ครับ (สำคัญมาก)
+#         # LangChain บางเวอร์ชันต้องการให้ใส่ใน constructor โดยตรง
+#         num_ctx=32000,
+#         num_predict=-1,
+#         keep_alive="60m",
+#         request_timeout=600.0,  # 🟢 เพิ่มตรงนี้
+#         timeout=600.0,
+#
+#         # 🟢 ใส่ options ย้ำอีกที (LangChain บางตัวอ่านจากตรงนี้)
+#         options={
+#             "num_ctx": 32000,
+#             "num_predict": -1,
+#             "temperature": temperature
+#         }
+#     )
 
-    return ChatOllama(
-        base_url=settings.OLLAMA_BASE_URL,
-        model=settings.MODEL_NAME,
-        temperature=temperature,
 
-        # 🟢 ย้าย config สำคัญมาไว้ในนี้ครับ (สำคัญมาก)
-        # LangChain บางเวอร์ชันต้องการให้ใส่ใน constructor โดยตรง
-        num_ctx=32000,
-        num_predict=-1,
-        keep_alive="60m",
-        request_timeout=600.0,  # 🟢 เพิ่มตรงนี้
-        timeout=600.0,
-
-        # 🟢 ใส่ options ย้ำอีกที (LangChain บางตัวอ่านจากตรงนี้)
-        options={
-            "num_ctx": 32000,
-            "num_predict": -1,
-            "temperature": temperature
-        }
-    )
-
-
-def query_qwen(messages: list, temperature: float = 0.0) -> str:
+def query_qwen(messages: list, temperature: float = 0.2) -> str:
     """
     ✅ Raw Function: ยิง Request ตรงๆ พร้อม Streaming output
     ใช้สำหรับ Conversation ทั่วไปของ Agent
@@ -73,11 +73,14 @@ def query_qwen(messages: list, temperature: float = 0.0) -> str:
         "model": settings.MODEL_NAME,
         "messages": messages,
         "stream": True,
-        "temperature": temperature,
         "options": {
             # "num_ctx": 4096,
-            "num_ctx": 32000,
-            "num_predict": -1
+            "num_ctx": 64000,
+            "num_predict": -1,
+            "temperature": temperature,  # ความคิดสร้างสรรค์ (0 = เป๊ะสุด, 1 = กาวสุด)
+            "top_k": 40,  # 10 ถึง 40 (ปกติ Ollama default อยู่ที่ 40 ครับ สำหรับโค้ดดิ้งลดลงมาเหลือ 20-40 จะทำให้มันไม่เผลอหยิบตัวแปรแปลกๆ มาใช้)
+            "top_p": 0.85,  # (Nucleus): 0.1 ถึง 0.5 (ตัดคำที่เป็นไปได้น้อยๆ ทิ้งไปเลย ให้มันโฟกัสแค่คำสั่งโค้ดที่ถูกต้อง)
+            "repeat_penalty": 1.1
         }
     }
 
