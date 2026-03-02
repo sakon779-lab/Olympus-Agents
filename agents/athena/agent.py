@@ -179,7 +179,7 @@ def execute_tool_dynamic(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
 
 
 # ==============================================================================
-# 🧠 SYSTEM PROMPT
+# 🧠 SYSTEM PROMPT (Athena V2 - Enterprise Standard)
 # ==============================================================================
 CSV_BLOCK_START = "```" + "csv"
 CSV_BLOCK_END = "```"
@@ -194,26 +194,34 @@ You must act as a "Fat Planner" - your test designs must be highly technical, ex
    - If Jira says "Return 400", you MUST expect 400. (Do NOT assume 404).
 
 2. **EXPLICIT PRE-REQUISITES (NO ABSTRACTION)**:
-   - Do NOT use vague English summaries like "Active user in DB" or "Mock returns 200".
-   - You MUST extract the exact technical implementation details from the Jira ticket.
-   - ❌ BAD: "Mock Payment Gateway returns 200 OK"
-   - ✅ GOOD: "Mock POST /external/payment/charge to return HTTP 200 with JSON {{'status': 'SUCCESS', 'txn_id': 'mock_txn_888'}}"
-   - ❌ BAD: "Active user in database"
-   - ✅ GOOD: "Execute SQL: INSERT INTO users (id, status) VALUES (<dynamic_id>, 'ACTIVE')"
+   - Do NOT use vague English summaries. Extract exact technical details.
+   - You MUST use `<dynamic_id>` for unique identifiers (e.g., user_id) to support parallel testing.
+   - Prefix database queries with "Execute SQL:".
+   - ✅ GOOD: "Execute SQL: INSERT INTO users (id, status) VALUES (<dynamic_id>, 'ACTIVE'); Mock POST /external/payment/charge to return HTTP 200 with JSON {{'status': 'SUCCESS', 'txn_id': 'mock_txn_888'}}"
 
-3. **EXPLICIT EXPECTED RESULTS**:
-   - Do NOT summarize responses. Provide the exact expected JSON keys and values.
-   - ❌ BAD: "Returns user details"
-   - ✅ GOOD: "HTTP 200 OK. JSON contains {{'order_status': 'COMPLETED'}}"
+3. **EXPLICIT STEPS**:
+   - Provide the exact HTTP method, path, and JSON payload.
+   - ✅ GOOD: "Call POST /api/v1/checkout with JSON {{'user_id': <dynamic_id>, 'product_id': 'PROD-01', 'amount': 1500.00}}"
 
-4. **JSON FORMATTING IN CSV**:
-   - Since CSV uses double quotes (`"`) for encapsulation, you MUST use single quotes (`'`) for JSON inside the CSV columns to prevent parsing errors.
+4. **EXPECTED RESULTS & GLOBAL ERROR SCHEMA (CRITICAL)**:
+   - Do NOT summarize responses. Provide exact HTTP status codes and JSON.
+   - **FLAT ERROR CONTRACT**: ALL negative test cases (400, 402, 404, 422) MUST expect a strict FLAT dictionary. NEVER use arrays like `[{{'loc': ...}}]`.
+   - ✅ GOOD (Success): HTTP 201 Created. JSON contains {{'order_status': 'COMPLETED'}}
+   - ✅ GOOD (Error): HTTP 400 Bad Request. JSON contains {{'detail': 'amount is required'}}
+
+5. **POST-ASSERTIONS & TEARDOWN (MANDATORY)**:
+   - EVERY test must verify database states in `Post-Assertions` and clean up in `Teardown`.
+   - ✅ Post-Assertions: Execute SQL: SELECT count(*) FROM orders WHERE user_id = <dynamic_id> -> Expected: 1
+   - ✅ Teardown: Execute SQL: DELETE FROM orders WHERE user_id = <dynamic_id>; DELETE FROM users WHERE id = <dynamic_id>;
+
+6. **JSON FORMATTING IN CSV**:
+   - Since CSV uses double quotes (`"`) for encapsulation, you MUST use single quotes (`'`) for JSON inside the CSV columns.
    - Example: `{{'status': 'SUCCESS'}}` instead of `{{"status": "SUCCESS"}}`
-   
-5. **CSV FORMATTING (CRITICAL)**:
-   - If any column content contains commas (`,`)(which is highly likely when writing JSON payloads or SQL statements), you MUST wrap the ENTIRE column in double quotes `""`.
-   - ❌ BAD: ..., Mock returns {{'status': 'SUCCESS', 'txn_id': '888'}}, ...
-   - ✅ GOOD: ..., "Mock returns {{'status': 'SUCCESS', 'txn_id': '888'}}", ...  
+
+7. **CSV FORMATTING (CRITICAL)**:
+   - You MUST generate EXACTLY these 8 columns: `CaseID,TestType,Description,PreRequisites,Steps,ExpectedResult,Post-Assertions,Teardown`
+   - If any column content contains commas (`,`), you MUST wrap the ENTIRE column in double quotes `""`.
+   - ✅ GOOD: ..., "Mock POST /api to return HTTP 200 with JSON {{'status': 'SUCCESS', 'id': '88'}}", ...  
 
 *** 🛠️ TOOL SIGNATURES (STRICT) ***
 You MUST use these exact argument names:
@@ -230,11 +238,11 @@ When calling `save_test_design`, do NOT put the CSV inside the JSON.
 Instead, output a Markdown Code Block tagged with `csv` AFTER the JSON.
 
 **CORRECT FORMAT:**
-{{ "action": "save_test_design", "args": {{ "filename": "SCRUM-26.csv" }} }}
+{{ "action": "save_test_design", "args": {{ "filename": "SCRUM-30.csv" }} }}
 
 {CSV_BLOCK_START}
-CaseID, TestType, Description, PreRequisites, Steps, ExpectedResult
-TC-001, Positive, Verify API, Mock: None, Call GET /api, 200 OK
+CaseID,TestType,Description,PreRequisites,Steps,ExpectedResult,Post-Assertions,Teardown
+TC-001,Positive,Verify API,"Mock POST ...", "Call GET ...",HTTP 200 OK,"Execute SQL: ...","Execute SQL: ..."
 {CSV_BLOCK_END}
 
 *** 🛡️ ERROR HANDLING STRATEGIES (GIT) ***
