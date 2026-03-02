@@ -67,7 +67,7 @@ def run_robot_test(file_path: str) -> str:
     output = run_command(cmd, cwd=workspace, timeout=600)
 
     # 💡 2. เปลี่ยนมาใช้ Negative Index [-1000:] เพื่อดึง "ส่วนท้ายสุด" ของ Log มาให้ AI อ่าน
-    if "Command Success" in output:
+    if " 0 failed" in output and " 0 passed" not in output:
         clean_output = output.replace("✅ Command Success:\n", "")
         return f"✅ Tests Passed:\n...{clean_output[-1000:]}"
     else:
