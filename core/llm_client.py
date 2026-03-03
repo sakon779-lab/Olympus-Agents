@@ -59,7 +59,8 @@ def get_text_embedding(text: str, model: str = None) -> list:
 
         response = requests.post(
             f"{local_ollama_url}/api/embed",
-            json={"model": target_model, "input": text}
+            json={"model": target_model, "input": text, "options": {"num_ctx": 4096}}
+
         )
 
         if response.status_code == 200:

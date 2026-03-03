@@ -3,7 +3,6 @@ import json
 from typing import Any
 from knowledge_base.database import SessionLocal, init_db
 from knowledge_base.models import JiraKnowledge
-from knowledge_base.vector_store import add_ticket_to_vector
 from knowledge_base.database import SessionLocal
 from knowledge_base.models import JiraKnowledge
 import re # ✅ เพิ่ม import re

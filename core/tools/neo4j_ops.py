@@ -5,6 +5,51 @@ from core.config import settings
 logger = logging.getLogger("Neo4jOps")
 
 
+def search_knowledge_graph(question_embedding: list, top_k: int = 3) -> str:
+    """ค้นหาข้อมูลจาก Neo4j ด้วย Vector Search และดึง Graph Context กลับมา"""
+
+    # คำสั่ง Cypher ผสมผสาน: หา Vector ที่ใกล้เคียง -> วิ่งไปหา Ticket -> วิ่งไปหา Component
+    search_query = """
+    CALL db.index.vector.queryNodes('chunk_embedding', $top_k, $embedding)
+    YIELD node AS chunk, score
+    MATCH (t:Ticket)-[:HAS_CHUNK]->(chunk)
+    OPTIONAL MATCH (t)-[:IMPACTS]->(c:Component)
+    RETURN t.id AS ticket_id, 
+           t.summary AS summary, 
+           t.status AS status, 
+           collect(c.name) AS components, 
+           chunk.text AS context, 
+           score
+    ORDER BY score DESC
+    """
+
+    try:
+        from core.config import settings
+        from neo4j import GraphDatabase
+
+        results_text = []
+        with GraphDatabase.driver(settings.NEO4J_URI, auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)) as driver:
+            with driver.session() as session:
+                result = session.run(search_query, top_k=top_k, embedding=question_embedding)
+
+                for record in result:
+                    ticket_id = record["ticket_id"]
+                    components = ", ".join(record["components"]) if record["components"] else "None"
+                    # คัดมาเฉพาะข้อมูลเน้นๆ ให้ AI อ่าน
+                    doc = (f"🎯 Ticket: {ticket_id} (Status: {record['status']})\n"
+                           f"📌 Summary: {record['summary']}\n"
+                           f"⚙️ Impacts Systems: {components}\n"
+                           f"📖 Details: {record['context']}\n"
+                           f"---")
+                    results_text.append(doc)
+
+        return "\n".join(results_text) if results_text else "❌ No relevant context found in Graph."
+
+    except Exception as e:
+        import logging
+        logging.getLogger("Neo4jOps").error(f"❌ Graph Search Error: {e}")
+        return f"❌ Graph Search Error: {e}"
+
 def sync_unstructured_to_graph(issue_key: str, extracted_data: dict, embedding_vector: list = None, raw_text: str = ""):
     """นำข้อมูลที่ LLM สกัดได้ (Components) และ Vector Embeddings ไปผูกกับตั๋วใน Graph"""
 

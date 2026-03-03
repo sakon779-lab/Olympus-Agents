@@ -215,11 +215,13 @@ def ask_database_analyst(question: str) -> str:
 def ask_guru(question: str) -> str:
     """
     Expert on Business Logic & Jira Tickets.
-    Uses Vector Database and Internal Knowledge SQL.
+    Uses Neo4j Graph + Vector Database for contextual search.
     """
     # 🟢 [LAZY LOAD]
-    from knowledge_base.vector_store import search_vector_db
     from core.tools.knowledge_ops import get_knowledge_from_sql
+    from core.tools.neo4j_ops import search_knowledge_graph
+    from core.llm_client import get_text_embedding
+    import re
 
     logger.info(f"🔎 Guru received: {question}")
 
@@ -238,13 +240,22 @@ def ask_guru(question: str) -> str:
         if results:
             return "\n---\n".join(results)
 
-    # 📚 Layer 2: The Librarian (Vector Search)
-    logger.info("🧠 Fallback to Semantic Search...")
+    # 📚 Layer 2: The Graph Librarian (Neo4j Vector Search)
+    logger.info("🧠 Fallback to Graph Semantic Search...")
     try:
-        results = search_vector_db(question, k=4)
-        if not results or "no relevant info" in results.lower():
+        # 1. แปลงคำถามให้เป็น Vector ก่อน (ใช้ Nomic จาก Local)
+        question_vector = get_text_embedding(question)
+        if not question_vector:
+            return "❌ Failed to generate embedding for the question."
+
+        # 2. ค้นหาใน Neo4j
+        graph_results = search_knowledge_graph(question_vector, top_k=3)
+
+        if "❌" in graph_results or not graph_results.strip():
             return "❌ No info found in knowledge base."
-        return f"📚 Relevant Docs found:\n{results}"
+
+        return f"📚 Relevant Context from Graph:\n{graph_results}"
+
     except Exception as e:
         return f"❌ Search Error: {e}"
 
@@ -304,6 +315,12 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     ]
 
     try:
+        # Helper Serialize
+        def safe_serialize(obj):
+            if isinstance(obj, (dict, list)):
+                return json.dumps(obj, ensure_ascii=False, indent=2)
+            return str(obj) if obj else "-"
+
         llm_response = query_qwen(extraction_prompt)
 
         # Handle Response Type
@@ -320,15 +337,21 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
 
         # แปลงเป็น Dict (เรียกใช้ Global Helper robust_json_parser)
         data = robust_json_parser(content_text)
+        vector_ready_text = f"""
+                TICKET: {issue_key}
+                SUMMARY: {real_summary}
+                TYPE: {real_type}
+                STATUS: {real_status}
+                BUSINESS LOGIC: {safe_serialize(data.get("business_logic"))}
+                TECHNICAL SPEC: {safe_serialize(data.get("technical_spec"))}
+                COMPONENTS: {", ".join(data.get("components", []))}
+                """
 
         # 🎯 [NEW] ดึง Vector Embedding ก่อนเซฟ
-        embedding_vector = get_text_embedding(raw_content)
+        embedding_vector = get_text_embedding(vector_ready_text)
+        # 👇 [เพิ่มบรรทัดนี้ลงไปเพื่อแอบดู] 👇
+        print(f"📊 DEBUG Vector Size: {len(embedding_vector)} dimensions")
 
-        # Helper Serialize
-        def safe_serialize(obj):
-            if isinstance(obj, (dict, list)):
-                return json.dumps(obj, ensure_ascii=False, indent=2)
-            return str(obj) if obj else "-"
 
         # 🗄️ โยนทุกอย่างให้ knowledge_ops จัดการเซฟ (SQL + Neo4j Graph)
         result = save_knowledge(
@@ -370,24 +393,6 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         logger.error(f"❌ General Error: {e}")
         return f"❌ Sync Failed at pipeline step: {e}"
 
-    except json.JSONDecodeError as je:
-        logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
-        save_knowledge(
-            issue_key=issue_key,
-            summary=f"[AI Error] {real_summary}",
-            status=real_status,
-            business_logic=f"⚠️ AI Parsing Failed. Raw Content:\n{raw_content[:2000]}",
-            technical_spec="-",
-            test_scenarios="-",
-            issue_type=real_type,
-            parent_key=real_parent_key,
-            issue_links=real_issue_links
-        )
-        return f"⚠️ Synced {issue_key} ({graph_status}, Meta PostgREST OK, but AI Analysis failed). Saved raw content."
-
-    except Exception as e:
-        logger.error(f"❌ General Error: {e}")
-        return f"❌ Sync Failed at PostgREST step: {e}\nGraph Status: {graph_status}"
 
 
 # ==============================================================================

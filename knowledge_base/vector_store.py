@@ -20,7 +20,7 @@ PERSIST_DIRECTORY = os.path.join(BASE_DIR, "chroma_db")
 _VECTOR_DBS: Dict[str, any] = {}
 _EMBEDDINGS = None
 
-def get_vector_db(collection_name: str = "jira_knowledge"):
+def get_vector_db(collection_name: str = "robot_framework_keywords"):
     """
     Init DB แยกตาม Collection (Lazy Load)
     """
@@ -53,61 +53,61 @@ def get_vector_db(collection_name: str = "jira_knowledge"):
 
     return _VECTOR_DBS[collection_name]
 
-def add_ticket_to_vector(issue_key: str, summary: str, content: str):
-    """
-    Save ticket data to Vector DB.
-    """
-    # ✅ เรียกใช้ผ่านฟังก์ชันแทนตัวแปรตรงๆ
-    db = get_vector_db()
-
-    logging.info(f"🧠 VECTOR: Embedding ticket {issue_key}...")
-
-    full_text = f"""
-    Ticket: {issue_key}
-    Summary: {summary}
-    Knowledge: {content}
-    """
-
-    doc = Document(
-        page_content=full_text,
-        metadata={"issue_key": issue_key, "source": "jira"}
-    )
-
-    try:
-        # ดึง ID เก่าออกมา
-        existing_docs = db.get(where={"issue_key": issue_key})
-        if existing_docs and existing_docs['ids']:
-            db.delete(ids=existing_docs['ids'])
-            logging.info(f"♻️ Updated existing vector for {issue_key}")
-    except Exception as e:
-        logging.warning(f"⚠️ Vector delete warning: {e}")
-
-    # เพิ่ม Vector ใหม่
-    db.add_documents([doc])
-    logging.info(f"✅ VECTOR: Saved {issue_key} successfully.")
-
-def search_vector_db(query: str, k: int = 4):
-    """ค้นหาข้อมูลด้วยความหมาย (Semantic Search)"""
-    # ✅ เรียกใช้ผ่านฟังก์ชันแทนตัวแปรตรงๆ
-    db = get_vector_db()
-
-    logging.info(f"🧠 Semantic Searching for: '{query}'")
-
-    results = db.similarity_search_with_score(query, k=k)
-
-    if not results:
-        return "❌ No relevant info found in Vector DB."
-
-    parsed_results = []
-    for doc, score in results:
-        parsed_results.append(f"""
-        --- MATCH (Score: {score:.2f}) ---
-        Key: {doc.metadata.get('issue_key')}
-        Content: {doc.page_content}
-        -----------------------------------
-        """)
-
-    return "\n".join(parsed_results)
+# def add_ticket_to_vector(issue_key: str, summary: str, content: str):
+#     """
+#     Save ticket data to Vector DB.
+#     """
+#     # ✅ เรียกใช้ผ่านฟังก์ชันแทนตัวแปรตรงๆ
+#     db = get_vector_db()
+#
+#     logging.info(f"🧠 VECTOR: Embedding ticket {issue_key}...")
+#
+#     full_text = f"""
+#     Ticket: {issue_key}
+#     Summary: {summary}
+#     Knowledge: {content}
+#     """
+#
+#     doc = Document(
+#         page_content=full_text,
+#         metadata={"issue_key": issue_key, "source": "jira"}
+#     )
+#
+#     try:
+#         # ดึง ID เก่าออกมา
+#         existing_docs = db.get(where={"issue_key": issue_key})
+#         if existing_docs and existing_docs['ids']:
+#             db.delete(ids=existing_docs['ids'])
+#             logging.info(f"♻️ Updated existing vector for {issue_key}")
+#     except Exception as e:
+#         logging.warning(f"⚠️ Vector delete warning: {e}")
+#
+#     # เพิ่ม Vector ใหม่
+#     db.add_documents([doc])
+#     logging.info(f"✅ VECTOR: Saved {issue_key} successfully.")
+#
+# def search_vector_db(query: str, k: int = 4):
+#     """ค้นหาข้อมูลด้วยความหมาย (Semantic Search)"""
+#     # ✅ เรียกใช้ผ่านฟังก์ชันแทนตัวแปรตรงๆ
+#     db = get_vector_db()
+#
+#     logging.info(f"🧠 Semantic Searching for: '{query}'")
+#
+#     results = db.similarity_search_with_score(query, k=k)
+#
+#     if not results:
+#         return "❌ No relevant info found in Vector DB."
+#
+#     parsed_results = []
+#     for doc, score in results:
+#         parsed_results.append(f"""
+#         --- MATCH (Score: {score:.2f}) ---
+#         Key: {doc.metadata.get('issue_key')}
+#         Content: {doc.page_content}
+#         -----------------------------------
+#         """)
+#
+#     return "\n".join(parsed_results)
 
 def add_robot_keyword_to_vector(library_name: str, keyword_name: str, arguments: str, doc_string: str):
     """
