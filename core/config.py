@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
 
+    # --- 🎫 NEO4J ---
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
+
     # --- 🎫 JIRA ---
     JIRA_URL: str = ""
     JIRA_EMAIL: str = ""

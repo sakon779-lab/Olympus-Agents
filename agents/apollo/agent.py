@@ -11,11 +11,39 @@ import core.network_fix
 # ✅ Core Modules (Lightweight Imports)
 from core.llm_client import query_qwen
 from core.config import settings
+from core.tools.jira_ops import get_recently_updated_issues, get_jira_issue
+from core.tools.neo4j_ops import sync_ticket_to_graph
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
+
+def sync_recent_jira_to_graph(hours: int = 24) -> str:
+    """Tool สำหรับให้ Apollo สั่งดึงตั๋วล่าสุดจาก Jira แล้วอัดเข้า Graph Database"""
+    print(f"🔄 [Apollo Tool] Syncing Jira issues updated in last {hours} hours...")
+
+    # 1. ดึง Key ของตั๋วที่เพิ่งอัปเดต (จาก jira_ops.py)
+    issues_list = get_recently_updated_issues(hours)
+    if not issues_list:
+        return "✅ Graph Sync Complete: No new tickets found in the specified timeframe."
+
+    success_count = 0
+    # 2. วนลูปดึงรายละเอียดตั๋วทีละใบ แล้วยัดลง Graph
+    for issue in issues_list:
+        issue_key = issue.get("key")
+        if not issue_key: continue
+
+        # ใช้ Tool เดิมที่มีอยู่แล้วดึงรายละเอียด
+        details = get_jira_issue(issue_key)
+        if details.get("success"):
+            # โยนเข้า Neo4j
+            is_saved = sync_ticket_to_graph(details)
+            if is_saved:
+                success_count += 1
+
+    return f"✅ Graph Sync Complete: Successfully updated {success_count} out of {len(issues_list)} tickets to Neo4j Graph."
 
 # ✅ Reuse Parser Logic (ดึงออกมาเป็น Global Helper)
 def robust_json_parser(text: str) -> Dict[str, Any]:
@@ -223,22 +251,26 @@ def ask_guru(question: str) -> str:
 
 def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     """
-    Orchestrate the sync process: Read Jira -> Extract Info using LLM -> Save to Vector DB
+    Orchestrate the sync process:
+    Read Jira -> Extract Info using LLM & Embeddings -> Delegate to knowledge_ops to save (SQL + Graph)
     """
     # 🟢 [LAZY LOAD]
     from core.tools.jira_ops import get_jira_issue
     from core.tools.knowledge_ops import save_knowledge
+    from core.llm_client import get_text_embedding  # ✅ โหลด Tool สำหรับทำ Vector
 
-    logger.info(f"🔄 Syncing Ticket: {issue_key}")
+    logger.info(f"🔄 Syncing Ticket to Databases: {issue_key}")
 
-    # 1. ดึงข้อมูลครั้งเดียว (One Shot)
+    # 1. ดึงข้อมูลครั้งเดียวจาก Jira (One Shot)
     ticket_data = get_jira_issue(issue_key)
 
     # เช็คว่า Error ไหม
-    if not ticket_data.get("success"):
-        return f"❌ Sync Failed: {ticket_data.get('error')}"
+    if not ticket_data or not ticket_data.get("success"):
+        return f"❌ Sync Failed: {ticket_data.get('error', 'Failed to fetch data from Jira')}"
 
-    # ✅ Extract Variables
+    logger.info(f"🧠 Extracting knowledge via LLM for {issue_key}...")
+
+    # ✅ Extract Variables สำหรับส่งให้ LLM
     raw_content = ticket_data["ai_content"]
     real_status = ticket_data["status"]
     real_type = ticket_data["issue_type"]
@@ -246,7 +278,7 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     real_parent_key = ticket_data.get("parent_key")
     real_issue_links = ticket_data.get("issue_links")
 
-    # 2. ใช้สมอง (Qwen) สรุปข้อมูล
+    # ใช้สมอง (Qwen) สรุปข้อมูล
     extraction_prompt = [
         {"role": "system", "content": """
         You are a Data Extractor parsing Jira ticket content into structured JSON.
@@ -257,7 +289,11 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         - technical_spec: API endpoints, database changes, or technical constraints.
         - test_scenarios: Acceptance criteria or test cases mentioned.
         - issue_type: (Story, Bug, Task).
-        
+
+        EXTRACT GRAPH ENTITIES (Crucial):
+        - components: List of technical components/systems mentioned (e.g., ["Payment API", "PostgreSQL", "Frontend UI"]). Empty list if none.
+        - implicit_depends_on: List of OTHER ticket keys mentioned in text that this ticket depends on (e.g., ["SCRUM-29", "SCRUM-31"]). Empty list if none.
+
         STRICT RULES:
         1. Use double quotes (") for keys and string values.
         2. Escape inner quotes properly (e.g. "behavior": "Returns \\"Error\\" message").
@@ -282,8 +318,11 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         if content_text.endswith("```"): content_text = content_text[:-3]
         content_text = content_text.strip()
 
-        # แปลงเป็น Dict
+        # แปลงเป็น Dict (เรียกใช้ Global Helper robust_json_parser)
         data = robust_json_parser(content_text)
+
+        # 🎯 [NEW] ดึง Vector Embedding ก่อนเซฟ
+        embedding_vector = get_text_embedding(raw_content)
 
         # Helper Serialize
         def safe_serialize(obj):
@@ -291,7 +330,7 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
                 return json.dumps(obj, ensure_ascii=False, indent=2)
             return str(obj) if obj else "-"
 
-        # 3. Save ลง DB
+        # 🗄️ โยนทุกอย่างให้ knowledge_ops จัดการเซฟ (SQL + Neo4j Graph)
         result = save_knowledge(
             issue_key=issue_key,
             summary=real_summary,
@@ -300,11 +339,36 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             technical_spec=safe_serialize(data.get("technical_spec")),
             test_scenarios=safe_serialize(data.get("test_scenarios")),
             issue_type=real_type,
-            parent_key=real_parent_key,  # ✅ New Field
-            issue_links=real_issue_links  # ✅ New Field
+            parent_key=real_parent_key,
+            issue_links=real_issue_links,
+            # ✅ โยนของใหม่ไปให้ท่อ Neo4j ด้านในทำต่อ
+            ticket_data=ticket_data,
+            extracted_data=data,
+            embedding_vector=embedding_vector,
+            raw_text=raw_content
         )
 
-        return f"✅ Synced {issue_key} successfully!\nDetails: {result}"
+        return f"✅ Sync Flow Completed for {issue_key}!\nDetails: {result}"
+
+    except json.JSONDecodeError as je:
+        logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
+        save_knowledge(
+            issue_key=issue_key,
+            summary=f"[AI Error] {real_summary}",
+            status=real_status,
+            business_logic=f"⚠️ AI Parsing Failed. Raw Content:\n{raw_content[:2000]}",
+            technical_spec="-",
+            test_scenarios="-",
+            issue_type=real_type,
+            parent_key=real_parent_key,
+            issue_links=real_issue_links,
+            ticket_data=ticket_data  # ส่งข้อมูลดิบไปให้รอดำเนินการทำ Graph ได้แม้ AI จะพัง
+        )
+        return f"⚠️ Synced {issue_key} (Meta PostgREST OK, but AI Analysis failed). Saved raw content."
+
+    except Exception as e:
+        logger.error(f"❌ General Error: {e}")
+        return f"❌ Sync Failed at pipeline step: {e}"
 
     except json.JSONDecodeError as je:
         logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
@@ -319,11 +383,11 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             parent_key=real_parent_key,
             issue_links=real_issue_links
         )
-        return f"⚠️ Synced {issue_key} (Metadata OK, but AI Analysis failed). Saved raw content."
+        return f"⚠️ Synced {issue_key} ({graph_status}, Meta PostgREST OK, but AI Analysis failed). Saved raw content."
 
     except Exception as e:
         logger.error(f"❌ General Error: {e}")
-        return f"❌ Sync Failed: {e}"
+        return f"❌ Sync Failed at PostgREST step: {e}\nGraph Status: {graph_status}"
 
 
 # ==============================================================================
@@ -333,7 +397,8 @@ TOOLS = {
     "ask_guru": ask_guru,
     "ask_database_analyst": ask_database_analyst,
     "sync_ticket": sync_ticket_to_knowledge_base,
-    "sync_recent_tickets": sync_recent_tickets # ✅ เพิ่มน้องเข้าไป
+    "sync_recent_tickets": sync_recent_tickets,
+    "sync_recent_jira_to_graph": sync_recent_jira_to_graph
 }
 
 
@@ -381,11 +446,21 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 2. **JSON FORMAT**: No comments. Strict JSON.
 
 *** 🛠️ TOOLS AVAILABLE ***
-- sync_ticket(issue_key): Syncs one specific Jira ticket.
-- sync_recent_tickets(hours): Scans and syncs all tickets updated within the last N hours.
-- ask_guru(question): Search internal knowledge/vector DB for logic and business rules.
-- ask_database_analyst(question): Executes SQL queries for statistics and counts.
-- task_complete(summary): Final answer after all actions are done.
+You are equipped with a hybrid architecture. You must choose the correct tool based on the user's intent:
+1. `sync_ticket(issue_key)`
+   - Use: When the user asks to update, ingest, or check the latest status of ONE specific Jira ticket into the Knowledge Graph.
+2. `sync_recent_tickets(hours)`
+   - Use: When the user asks to update the database with the latest changes, or scan for recent updates (e.g., "อัปเดตข้อมูลของวันนี้ให้หน่อย").
+3. `ask_guru(question)`
+   - Use: For "Contextual & Relationship" questions. 
+   - Keywords: "ทำไม", "ใครทำ", "กระทบส่วนไหน", "ตั๋วไหนบล็อกอยู่", "สรุปเนื้อหา", "ความสัมพันธ์".
+   - Target: Queries the Graph Database (Neo4j) and Vector Search for deep architectural context and ticket dependencies.
+4. `ask_database_analyst(question)`
+   - Use: STRICTLY for "Statistical & Quantitative" questions.
+   - Keywords: "กี่ใบ", "รวมทั้งหมด", "สถิติ", "ความเร็ว (Velocity)", "จำนวน".
+   - Target: Executes exact SQL queries via PostgREST for hard numbers and aggregations.
+5. `task_complete(summary)`
+   - Use: Provide the final human-readable answer after successfully retrieving data from the tools above.
 
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }

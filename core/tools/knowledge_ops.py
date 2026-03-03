@@ -34,7 +34,8 @@ def get_knowledge_from_sql(issue_key: str) -> str:
 
 # ✅ เพิ่ม parameter: issue_type (default="Task")
 def save_knowledge(issue_key: str, summary: str, status: str, business_logic: str, technical_spec: Any,
-                   test_scenarios: Any, issue_type: str = "Task", parent_key=None, issue_links=None) -> str:
+                   test_scenarios: Any, issue_type: str = "Task", parent_key=None, issue_links=None,
+                   ticket_data: dict = None, extracted_data: dict = None, embedding_vector: list = None, raw_text: str = None) -> str:
     """
     บันทึกความรู้ลง Database (รองรับ issue_type เพื่อกัน Error NotNull)
     """
@@ -64,26 +65,23 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
         session.add(knowledge)
         session.commit()
 
-        # 2. Update Vector
-        combined_content = f"""
-        Ticket: {issue_key}
-        Type: {issue_type}
-        Status: {status}
-        Parent: {parent_key if parent_key else 'None'}
-        Links: {issue_links if issue_links else 'None'}
+        # ==========================================
+        # 🕸️ 2. Update Graph & Vector (Neo4j) - แทนที่ ChromaDB
+        # ==========================================
+        from core.tools.neo4j_ops import sync_ticket_to_graph, sync_unstructured_to_graph
 
-        Business Logic: 
-        {business_logic}
+        graph_status = ""
+        # 2.1 เซฟข้อมูลพื้นฐาน (Structured Data)
+        if ticket_data:
+            sync_ticket_to_graph(ticket_data)
+            graph_status += "[Graph Nodes OK] "
 
-        Technical Spec: 
-        {str(technical_spec)}
+        # 2.2 เซฟข้อมูลเชิงลึกและ Vector (Unstructured Data)
+        if extracted_data:
+            sync_unstructured_to_graph(issue_key, extracted_data, embedding_vector, raw_text)
+            graph_status += "[Graph Vector OK]"
 
-        Test Scenarios: 
-        {str(test_scenarios)}
-        """
-        add_ticket_to_vector(issue_key, summary, combined_content)
-
-        return f"✅ Knowledge Saved for {issue_key} (Type: {issue_type})"
+        return f"✅ Knowledge Saved for {issue_key} (Type: {issue_type}) | {graph_status}"
 
     except Exception as e:
         session.rollback()

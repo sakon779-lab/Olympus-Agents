@@ -47,6 +47,33 @@ except ImportError:
 #         }
 #     )
 
+def get_text_embedding(text: str, model: str = None) -> list:
+    """ฟังก์ชันกลางสำหรับแปลงข้อความเป็น Vector Embedding (รัน Local ตาม Config)"""
+
+    # 🎯 1. ถ้าไม่ได้ระบุ Model มา ให้ใช้ค่า Default จาก Config (nomic-embed-text)
+    target_model = model or getattr(settings, "EMBEDDING_MODEL", "nomic-embed-text")
+
+    try:
+        # 🎯 2. ดึง URL ของเครื่อง Local จาก Config
+        local_ollama_url = getattr(settings, "OLLAMA_LOCAL_URL", "http://localhost:11434")
+
+        response = requests.post(
+            f"{local_ollama_url}/api/embed",
+            json={"model": target_model, "input": text}
+        )
+
+        if response.status_code == 200:
+            embeddings = response.json().get("embeddings", [])
+            if embeddings:
+                return embeddings[0]
+        else:
+            logger.error(f"❌ Embedding API Error: Status {response.status_code} - {response.text}")
+
+    except Exception as e:
+        logger.error(f"❌ Local Embedding Error: {e}")
+
+    return []
+
 
 def query_qwen(messages: list, temperature: float = 0.2) -> str:
     """
