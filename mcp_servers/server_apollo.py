@@ -107,7 +107,12 @@ def background_worker(job_id: str, action_type: str, args: dict):
 
 @mcp.tool()
 def consult_knowledge_base(question: str) -> str:
-    """Ask Apollo's Knowledge Guru."""
+    """
+    Ask Apollo's Knowledge Guru.
+    USE THIS TOOL FOR: Deep contextual search, business logic, system impacts,
+    and finding relationships between Jira tickets or technical components.
+    Powered by a Hybrid GraphRAG (Neo4j) and Vector Search.
+    """
     try:
         return ask_guru(question)
     except Exception as e:
@@ -115,7 +120,11 @@ def consult_knowledge_base(question: str) -> str:
 
 @mcp.tool()
 def consult_database_stats(question: str) -> str:
-    """Ask Apollo's Data Analyst."""
+    """
+    Ask Apollo's Data Analyst.
+    USE THIS TOOL FOR: Hard numbers, statistics, counts, and aggregations.
+    Queries the live PostgreSQL database directly via SQL.
+    """
     try:
         return ask_database_analyst(question)
     except Exception as e:
@@ -124,8 +133,8 @@ def consult_database_stats(question: str) -> str:
 @mcp.tool()
 def sync_jira_ticket(issue_key: str) -> str:
     """
-    Start syncing a specific Jira ticket to the Knowledge Base (ASYNC).
-    Returns a Job ID immediately. Use this when the user wants to update/read a ticket.
+    Start syncing a specific Jira ticket to the Knowledge Graph (Neo4j & Vector DB).
+    (ASYNC) Returns a Job ID immediately. Use this when the user wants to update/read a ticket.
     """
     job_id = str(uuid.uuid4())[:8]
 
