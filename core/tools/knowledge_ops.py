@@ -32,9 +32,12 @@ def get_knowledge_from_sql(issue_key: str) -> str:
         session.close()
 
 # ✅ เพิ่ม parameter: issue_type (default="Task")
+# ✅ เพิ่ม parameter: issue_type (default="Task") และ assignee, story_point
 def save_knowledge(issue_key: str, summary: str, status: str, business_logic: str, technical_spec: Any,
                    test_scenarios: Any, issue_type: str = "Task", parent_key=None, issue_links=None,
-                   ticket_data: dict = None, extracted_data: dict = None, embedding_vector: list = None, raw_text: str = None) -> str:
+                   assignee: str = None, story_point: float = None,  # 🟢 [NEW] รับค่า 2 ตัวใหม่
+                   ticket_data: dict = None, extracted_data: dict = None, embedding_vector: list = None,
+                   raw_text: str = None) -> str:
     """
     บันทึกความรู้ลง Database (รองรับ issue_type เพื่อกัน Error NotNull)
     """
@@ -54,12 +57,16 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
 
         knowledge.summary = summary
         knowledge.status = status
-        knowledge.issue_type = issue_type  # ✅ บันทึกค่า issue_type
+        knowledge.issue_type = issue_type
         knowledge.parent_key = parent_key
         knowledge.issue_links = issue_links
         knowledge.business_logic = business_logic
         knowledge.technical_spec = str(technical_spec)
         knowledge.test_scenarios = str(test_scenarios)
+
+        # 🟢 [NEW] บันทึกค่าลงคอลัมน์ใหม่ใน Database
+        knowledge.assignee = assignee
+        knowledge.story_point = story_point
 
         session.add(knowledge)
         session.commit()

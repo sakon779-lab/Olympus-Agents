@@ -288,6 +288,8 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     real_summary = ticket_data["summary"]
     real_parent_key = ticket_data.get("parent_key")
     real_issue_links = ticket_data.get("issue_links")
+    real_assignee = ticket_data.get("assignee")
+    real_story_point = ticket_data.get("story_point")
 
     # ใช้สมอง (Qwen) สรุปข้อมูล
     extraction_prompt = [
@@ -364,6 +366,8 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             issue_type=real_type,
             parent_key=real_parent_key,
             issue_links=real_issue_links,
+            assignee=real_assignee,
+            story_point=real_story_point,
             # ✅ โยนของใหม่ไปให้ท่อ Neo4j ด้านในทำต่อ
             ticket_data=ticket_data,
             extracted_data=data,
@@ -385,6 +389,8 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             issue_type=real_type,
             parent_key=real_parent_key,
             issue_links=real_issue_links,
+            assignee=real_assignee,
+            story_point=real_story_point,
             ticket_data=ticket_data  # ส่งข้อมูลดิบไปให้รอดำเนินการทำ Graph ได้แม้ AI จะพัง
         )
         return f"⚠️ Synced {issue_key} (Meta PostgREST OK, but AI Analysis failed). Saved raw content."

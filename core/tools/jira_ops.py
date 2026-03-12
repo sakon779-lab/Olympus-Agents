@@ -10,17 +10,14 @@ def get_recently_updated_issues(hours: int = 24) -> list:
     """
     กวาดรายชื่อ Issue Key ที่มีการอัปเดตในช่วง N ชั่วโมงที่ผ่านมา โดยใช้ JQL
     """
-    # 1. สร้าง JQL: ค้นหา Ticket ที่ updated >= -Nh และเรียงจากใหม่ไปเก่า
     jql = f'updated >= "-{hours}h" ORDER BY updated DESC'
-
     url = f"{settings.JIRA_URL}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(settings.JIRA_EMAIL, settings.JIRA_API_TOKEN)
-    # ✅ ใช้ Headers ที่เรียบง่ายที่สุด (ไม่ต้องมี Content-Type เพราะไม่ได้ส่ง body)
+
     jira_headers = {
         "Accept": "application/json"
     }
 
-    # ✅ ส่งข้อมูลผ่าน Parameters (query string) แทน JSON payload
     params = {
         "jql": jql,
         "maxResults": 50,
@@ -41,10 +38,7 @@ def get_recently_updated_issues(hours: int = 24) -> list:
         if response.status_code == 200:
             data = response.json()
             issues = data.get('issues', [])
-
-            # ดึงเฉพาะ key ออกมาเป็น list [ "SCRUM-20", "SCRUM-21", ... ]
             issue_keys = [issue.get('key') for issue in issues if issue.get('key')]
-
             logger.info(f"✅ Found {len(issue_keys)} updated tickets: {issue_keys}")
             return issue_keys
         else:
@@ -54,6 +48,7 @@ def get_recently_updated_issues(hours: int = 24) -> list:
     except Exception as e:
         logger.error(f"❌ Exception during Jira search: {e}")
         return []
+
 
 def get_jira_issue(issue_key: str) -> dict:
     """
@@ -67,39 +62,50 @@ def get_jira_issue(issue_key: str) -> dict:
     }
 
     try:
-        # 🚀 ยิง API ครั้งเดียวจบ
         response = requests.get(url, headers=headers, auth=auth)
 
         if response.status_code == 200:
             data = response.json()
             fields = data.get('fields', {})
 
-            # 1. Basic Fields (Safe Access)
+            # 1. Basic Fields
             summary = fields.get('summary', 'No Summary')
-            # Handle Description carefully (API might return null)
             desc_raw = fields.get('description')
             description_adf = str(desc_raw) if desc_raw else ""
 
-            # Handle Nested Objects safely
             status_obj = fields.get('status') or {}
             status = status_obj.get('name', 'Unknown') if isinstance(status_obj, dict) else str(status_obj)
 
             type_obj = fields.get('issuetype') or {}
             issue_type = type_obj.get('name', 'Task') if isinstance(type_obj, dict) else str(type_obj)
 
-            # 🟢 [SAFE] 2. Extract Parent Key
             parent_obj = fields.get('parent') or {}
             parent_key = parent_obj.get('key') if isinstance(parent_obj, dict) else None
 
-            # 🟢 [SAFE] 3. Extract Issue Links (Fix TypeError)
+            # 🟢 [NEW] 1.1 Extract Assignee
+            assignee_obj = fields.get('assignee') or {}
+            assignee = assignee_obj.get('displayName', 'Unassigned')
+
+            # 🟢 [NEW] 1.2 Extract Story Points
+            # Jira มักจะซ่อน Story Point ไว้ใน customfield (ส่วนใหญ่คือ 10016 หรือ 10026)
+            story_point_raw = (
+                    fields.get('customfield_10016') or
+                    fields.get('customfield_10026') or
+                    fields.get('storyPoints')  # กรณีใช้ plugin บางตัว
+            )
+            try:
+                story_point = float(story_point_raw) if story_point_raw is not None else None
+            except ValueError:
+                story_point = None
+
+            # 2. Extract Issue Links
             raw_links = fields.get('issuelinks', [])
             formatted_links = []
 
             if isinstance(raw_links, list):
                 for link in raw_links:
-                    if not isinstance(link, dict): continue  # ข้ามถ้าไม่ใช่ Dict
+                    if not isinstance(link, dict): continue
 
-                    # กรณี A: Outward
                     if 'outwardIssue' in link:
                         outward = link.get('outwardIssue', {})
                         if isinstance(outward, dict):
@@ -107,7 +113,6 @@ def get_jira_issue(issue_key: str) -> dict:
                             target_key = outward.get('key', 'Unknown')
                             formatted_links.append({"type": rel_type, "target": target_key, "direction": "outward"})
 
-                    # กรณี B: Inward
                     elif 'inwardIssue' in link:
                         inward = link.get('inwardIssue', {})
                         if isinstance(inward, dict):
@@ -115,23 +120,23 @@ def get_jira_issue(issue_key: str) -> dict:
                             target_key = inward.get('key', 'Unknown')
                             formatted_links.append({"type": rel_type, "target": target_key, "direction": "inward"})
 
-            # Update Context for AI (AI ชอบ String อ่านง่ายๆ)
-            # เราต้องแปลงเฉพาะตอนส่งให้ AI อ่าน
             links_text_for_ai = ", ".join(
                 [f"{l['type']} {l['target']}" for l in formatted_links]) if formatted_links else "None"
 
-            # ✅ สร้าง Formatted String สำหรับส่งให้ AI อ่าน (รวมไว้ใน dict เลย)
+            # ✅ เพิ่ม ASSIGNEE และ STORY POINTS ให้ AI อ่านด้วย เผื่อมันใช้วิเคราะห์ Load งานได้
             ai_context_text = (
                 f"TICKET: {issue_key}\n"
                 f"SUMMARY: {summary}\n"
                 f"TYPE: {issue_type}\n"
                 f"STATUS: {status}\n"
+                f"ASSIGNEE: {assignee}\n"
+                f"STORY POINTS: {story_point if story_point is not None else 'None'}\n"
                 f"PARENT: {parent_key if parent_key else 'None'}\n"
                 f"LINKS: {links_text_for_ai}\n"
                 f"REQUIREMENTS: {description_adf}"
             )
 
-            # Return ก้อนเดียว มีครบทุกอย่าง
+            # Return ก้อนเดียว ส่งค่าใหม่กลับไปด้วย
             return {
                 "success": True,
                 "issue_key": issue_key,
@@ -141,7 +146,9 @@ def get_jira_issue(issue_key: str) -> dict:
                 "description": description_adf,
                 "parent_key": parent_key,
                 "issue_links": formatted_links,
-                "ai_content": ai_context_text  # <-- AI เอาอันนี้ไปใช้
+                "assignee": assignee,  # ✅ ส่งกลับไปให้ Database
+                "story_point": story_point,  # ✅ ส่งกลับไปให้ Database
+                "ai_content": ai_context_text
             }
         else:
             error_msg = f"❌ Error: Failed to fetch {issue_key}. Status: {response.status_code}"
