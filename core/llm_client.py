@@ -4,6 +4,8 @@ import time
 import logging
 import socket
 from core.config import settings
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 # ✅ Setup Logger
 logger = logging.getLogger("LLM_Client")

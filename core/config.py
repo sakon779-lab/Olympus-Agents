@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     JIRA_EMAIL: str = ""
     JIRA_API_TOKEN: str = ""
 
+    # --- 📊 GRAFANA ---
+    GRAFANA_URL: str = os.getenv("GRAFANA_URL", "http://localhost:3000")
+    GRAFANA_API_KEY: str = os.getenv("GRAFANA_API_KEY", "")
+    GRAFANA_POSTGRES_UID: str = os.getenv("GRAFANA_POSTGRES_UID", "")
+
     # --- 🔑 Secrets ---
     GITHUB_TOKEN: str = ""
 
