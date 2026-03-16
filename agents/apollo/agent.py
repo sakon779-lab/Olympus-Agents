@@ -12,7 +12,7 @@ import core.network_fix
 from core.llm_client import query_qwen
 from core.config import settings
 from core.tools.jira_ops import get_recently_updated_issues, get_jira_issue
-from core.tools.neo4j_ops import sync_ticket_to_graph
+from core.tools.neo4j_ops import sync_ticket_to_graph, search_code_graph
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
@@ -399,7 +399,27 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         logger.error(f"❌ General Error: {e}")
         return f"❌ Sync Failed at pipeline step: {e}"
 
+def ask_tech_lead(question: str) -> str:
+    """
+    Expert on Source Code & Technical Dependencies.
+    Uses Neo4j Graph Vector Search to find code functions and their relationships.
+    """
+    from core.llm_client import get_text_embedding
+    logger.info(f"🔎 Tech Lead received: {question}")
 
+    try:
+        question_vector = get_text_embedding(question)
+        if not question_vector:
+            return "❌ Failed to generate embedding for the question."
+
+        graph_results = search_code_graph(question_vector, top_k=3)
+
+        if "❌" in graph_results or not graph_results.strip():
+            return "❌ No code info found in knowledge base."
+
+        return f"💻 Relevant Code Context from Graph:\n{graph_results}"
+    except Exception as e:
+        return f"❌ Search Error: {e}"
 
 # ==============================================================================
 # 🧩 TOOLS REGISTRY
@@ -407,6 +427,7 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
 TOOLS = {
     "ask_guru": ask_guru,
     "ask_database_analyst": ask_database_analyst,
+    "ask_tech_lead": ask_tech_lead,
     "sync_ticket": sync_ticket_to_knowledge_base,
     "sync_recent_tickets": sync_recent_tickets,
     "sync_recent_jira_to_graph": sync_recent_jira_to_graph
@@ -446,6 +467,10 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
    - Examples: "Update tickets from today", "Sync last 5 hours", "Refresh knowledge base".
    - ✅ ACTION: Use `sync_recent_tickets(hours)`.
 
+5. **CASE: User asks about SOURCE CODE / FUNCTIONS / DEPENDENCIES** 💻
+   - Examples: "Which function connects to Jira?", "What calls create_dashboard?".
+   - ✅ ACTION: Use `ask_tech_lead(question)`.
+
 *** ⚠️ RULES ***
 - Do NOT guess. If you need stats, ask the analyst.
 - If the user doesn't specify hours for "sync today" or "sync recent", assume hours=24.
@@ -472,7 +497,9 @@ You are equipped with a hybrid architecture. You must choose the correct tool ba
    - Target: Executes exact SQL queries via PostgREST for hard numbers and aggregations.
 5. `task_complete(summary)`
    - Use: Provide the final human-readable answer after successfully retrieving data from the tools above.
-
+6. `ask_tech_lead(question)`
+   - Use: STRICTLY for queries about Source Code, Functions, Files, and Code Dependencies.
+   - Keywords: "ฟังก์ชัน", "โค้ด", "ไฟล์", "เรียกใช้งาน", "code", "function", "file".
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """

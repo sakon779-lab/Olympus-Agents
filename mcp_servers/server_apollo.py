@@ -47,7 +47,8 @@ try:
         ask_guru,
         ask_database_analyst,
         sync_ticket_to_knowledge_base,
-        sync_recent_tickets # ✅ เพิ่มตัวนี้เข้ามา
+        sync_recent_tickets,
+        ask_tech_lead
     )
 except ImportError as e:
     print(f"❌ [DEBUG] Error importing Apollo components: {e}")
@@ -129,6 +130,19 @@ def consult_database_stats(question: str) -> str:
         return ask_database_analyst(question)
     except Exception as e:
         return f"❌ Analyst Error: {str(e)}"
+
+@mcp.tool()
+def consult_technical_architecture(question: str) -> str:
+    """
+    Ask Apollo's Tech Lead.
+    USE THIS TOOL FOR: Source code queries, functions, files, and code dependencies.
+    Queries the Neo4j Graph Database to find how code components interact.
+    Keywords: function, file, code, script, calls, dependency
+    """
+    try:
+        return ask_tech_lead(question)
+    except Exception as e:
+        return f"❌ Tech Lead Error: {str(e)}"
 
 @mcp.tool()
 def sync_jira_ticket(issue_key: str) -> str:
