@@ -48,7 +48,8 @@ try:
         ask_database_analyst,
         sync_ticket_to_knowledge_base,
         sync_recent_tickets,
-        ask_tech_lead
+        ask_tech_lead,
+        sync_codebase_to_graph
     )
 except ImportError as e:
     print(f"❌ [DEBUG] Error importing Apollo components: {e}")
@@ -76,7 +77,6 @@ def redirect_stdout_to_stderr():
 # 👷 WORKER: คนทำงานเบื้องหลัง
 # ==============================================================================
 
-
 # 👷 อัปเกรด Worker ให้รองรับงานหลายประเภท
 def background_worker(job_id: str, action_type: str, args: dict):
     """Worker อเนกประสงค์สำหรับงาน Async"""
@@ -90,6 +90,12 @@ def background_worker(job_id: str, action_type: str, args: dict):
             elif action_type == "sync_recent":
                 # ✅ เรียกฟังก์ชัน sync ตามช่วงเวลาที่เราคุยกัน
                 result = sync_recent_tickets(args['hours'])
+            elif action_type == "sync_codebase":
+                # โยนค่าที่ได้ไปให้ Apollo Agent จัดการ
+                result = sync_codebase_to_graph(
+                    epic_key=args.get('epic_key', "SCRUM-32"),
+                    target_directory=args.get('target_directory')
+                )
             else:
                 result = "Unknown Action"
 
@@ -105,6 +111,41 @@ def background_worker(job_id: str, action_type: str, args: dict):
 # ==============================================================================
 # 🛠️ TOOLS
 # ==============================================================================
+
+@mcp.tool()
+def sync_codebase_async(epic_key: str = "SCRUM-32", target_directory: str = "") -> str:
+    """
+    Syncs the source code to the Knowledge Graph (Neo4j & Vector DB) (ASYNC).
+    Args:
+        epic_key: The Jira Epic ticket ID to bind this codebase to (e.g., SCRUM-32).
+        target_directory: (Optional) Absolute path to the repository. If not provided, uses default workspace.
+    """
+    job_id = f"code-{str(uuid.uuid4())[:6]}"
+
+    JOBS[job_id] = {
+        "type": "sync_codebase",
+        "target": epic_key,
+        "status": "PENDING",
+        "start_time": time.strftime("%H:%M:%S")
+    }
+
+    # 🚀 ส่งงานเข้า Background Thread
+    thread = threading.Thread(
+        target=background_worker,
+        args=(job_id, "sync_codebase", {
+            "epic_key": epic_key,
+            "target_directory": target_directory if target_directory else None
+        })
+    )
+    thread.daemon = True
+    thread.start()
+
+    return (
+        f"🚀 Codebase Sync Started! Job ID: {job_id}\n"
+        f"Target Epic: {epic_key}\n\n"
+        f"I am scanning the code in the background. "
+        f"Please use `check_job_status('{job_id}')` to monitor the progress."
+    )
 
 @mcp.tool()
 def consult_knowledge_base(question: str) -> str:

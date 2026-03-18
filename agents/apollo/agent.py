@@ -14,11 +14,33 @@ from core.config import settings
 from core.tools.jira_ops import get_recently_updated_issues, get_jira_issue
 from core.tools.neo4j_ops import sync_ticket_to_graph, search_code_graph
 
+from tools.sync_code_pipeline import run_full_sync_pipeline
+
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [Apollo] %(message)s')
 logger = logging.getLogger("ApolloAgent")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
+
+def sync_codebase_to_graph(epic_key: str = "SCRUM-32", target_directory: str = None) -> str:
+    """
+    Scans the codebase, updates AI summaries, and maps code to Jira tickets in Neo4j.
+    """
+    from core.config import settings
+    from tools.sync_code_pipeline import run_full_sync_pipeline
+
+    # 🎯 พระเอกอยู่ตรงนี้: ถ้าไม่ส่ง Path มา ให้ใช้ของ Default จาก Settings
+    if not target_directory:
+        target_directory = getattr(settings, 'AGENT_WORKSPACE', r"D:\Project\Olympus-Agents")
+
+    logger.info(f"🔄 Apollo starting Codebase Sync for Epic '{epic_key}' at path: {target_directory}")
+
+    try:
+        run_full_sync_pipeline(target_directory, epic_key)
+        return f"✅ Codebase successfully synced to Knowledge Graph (Epic: {epic_key})."
+    except Exception as e:
+        logger.error(f"❌ Failed to sync codebase: {e}")
+        return f"❌ Failed to sync codebase: {e}"
 
 def sync_recent_jira_to_graph(hours: int = 24) -> str:
     """Tool สำหรับให้ Apollo สั่งดึงตั๋วล่าสุดจาก Jira แล้วอัดเข้า Graph Database"""
@@ -470,6 +492,10 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 5. **CASE: User asks about SOURCE CODE / FUNCTIONS / DEPENDENCIES** 💻
    - Examples: "Which function connects to Jira?", "What calls create_dashboard?".
    - ✅ ACTION: Use `ask_tech_lead(question)`.
+   
+6. **CASE: User wants to UPDATE/SYNC CODEBASE ARCHITECTURE** 💻
+   - Examples: "Sync the Payment API codebase to SCRUM-99", "อัปเดตโค้ดโฟลเดอร์นี้เข้า Epic SCRUM-45 ให้หน่อย".
+   - ✅ ACTION: Use `sync_codebase_to_graph(epic_key, target_directory)`.
 
 *** ⚠️ RULES ***
 - Do NOT guess. If you need stats, ask the analyst.
