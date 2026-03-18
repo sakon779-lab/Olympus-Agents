@@ -158,35 +158,49 @@ def sync_ticket_to_graph(ticket_data: dict) -> bool:
         return False
 
 
-def search_code_graph(question_embedding: list, top_k: int = 3) -> str:
-    """ค้นหาข้อมูลโครงสร้างโค้ดและ Dependencies จาก Neo4j Vector Search"""
+def search_code_graph(question_embedding: list, question_text: str = "", top_k: int = 5) -> str:
+    """ค้นหาข้อมูลโครงสร้างโค้ดแบบ Hybrid (List Concatenation)"""
 
-    # 🌟 อัปเกรด Cypher ให้ทำ Impact Analysis 🌟
     search_query = """
-    CALL db.index.vector.queryNodes('code_embeddings', $top_k, $embedding)
-    YIELD node AS c, score
+    // 1. ตะกร้า Vector (หาความหมาย)
+    CALL db.index.vector.queryNodes('code_chunk_embeddings', $top_k, $embedding)
+    YIELD node AS chunk_vec, score AS vec_score
+    MATCH (c_vec:CodeNode)-[:HAS_CHUNK]->(chunk_vec)
+    WITH collect({c: c_vec, chunk: chunk_vec, score: vec_score}) AS vec_results
 
-    // 1. หาว่ามันไปเรียกใช้ใคร (Downstream Dependencies)
+    // 2. ตะกร้า Keyword (หาชื่อฟังก์ชันตรงๆ)
+    OPTIONAL MATCH (c_kw:CodeNode)-[:HAS_CHUNK]->(chunk_kw:CodeChunk)
+    WHERE $question_text <> "" AND size(c_kw.name) > 3 AND toLower($question_text) CONTAINS toLower(c_kw.name)
+    WITH vec_results, collect({c: c_kw, chunk: chunk_kw, score: 1.0}) AS kw_results
+
+    // 🌟 3. ตะกร้า Two-Hop (Cross-domain: หาตั๋ว Jira แล้วดึงโค้ดที่เกี่ยวข้องมาโชว์) 🌟
+    OPTIONAL MATCH (t:Ticket)<-[:IMPLEMENTS|BELONGS_TO]-(c_tkt:CodeNode)-[:HAS_CHUNK]->(chunk_tkt:CodeChunk)
+    WHERE $question_text <> "" AND toUpper($question_text) CONTAINS toUpper(t.id)
+    WITH vec_results, kw_results, collect({c: c_tkt, chunk: chunk_tkt, score: 1.0}) AS tkt_results
+
+    // เทรวมทั้ง 3 ตะกร้าเข้าด้วยกัน
+    UNWIND (vec_results + kw_results + tkt_results) AS res
+    WITH res.c AS c, res.chunk AS chunk, res.score AS score
+    WHERE c IS NOT NULL
+    WITH c, chunk, max(score) AS final_score
+    ORDER BY final_score DESC
+    LIMIT $top_k
+
+    // ดึง Impact (หน้า-หลัง-ตั๋ว)
     OPTIONAL MATCH (c)-[:CALLS]->(callee:CodeNode)
-
-    // 2. หาว่า 'ใครมาเรียกใช้มันบ้าง' (Upstream Impact - สำคัญมาก!)
     OPTIONAL MATCH (caller:CodeNode)-[:CALLS]->(c)
-
-    // 3. หาว่ามันกระทบตั๋ว Jira ใบไหนบ้าง (Business Impact จาก AI Auto-Mapper)
     OPTIONAL MATCH (c)-[:IMPLEMENTS]->(t:Ticket)
-
-    // 4. สังกัด Epic ไหน (เผื่อไว้)
     OPTIONAL MATCH (c)-[:BELONGS_TO]->(e:Ticket)
 
     RETURN c.name AS function_name, 
            c.file_path AS file_path, 
            c.ai_summary AS summary,
+           chunk.text AS code_content,
            e.id AS epic_ticket,
            collect(DISTINCT callee.name) AS calls_to,
            collect(DISTINCT caller.name) AS called_by,
            collect(DISTINCT t.id) AS implemented_tickets,
-           score
-    ORDER BY score DESC
+           final_score AS score
     """
 
     try:
@@ -196,7 +210,8 @@ def search_code_graph(question_embedding: list, top_k: int = 3) -> str:
         results_text = []
         with GraphDatabase.driver(settings.NEO4J_URI, auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)) as driver:
             with driver.session() as session:
-                result = session.run(search_query, top_k=top_k, embedding=question_embedding)
+                result = session.run(search_query, top_k=top_k, embedding=question_embedding,
+                                     question_text=question_text)
 
                 for record in result:
                     deps_to = ", ".join(record["calls_to"]) if record["calls_to"] else "None"
@@ -208,12 +223,14 @@ def search_code_graph(question_embedding: list, top_k: int = 3) -> str:
                            f"👇 [Downstream] It calls: {deps_to}\n"
                            f"👆 [Upstream Impact] Called by: {deps_from}\n"
                            f"💼 [Business Impact] Related Tickets: {tickets} (Epic: {record['epic_ticket']})\n"
+                           f"💻 Raw Code:\n{record['code_content']}\n"
                            f"---")
                     results_text.append(doc)
 
-        return "\n".join(results_text) if results_text else "❌ No relevant code found in Graph."
+        return "\n".join(results_text) if results_text else "❌ No relevant code chunk found in Graph."
 
     except Exception as e:
         import logging
+        # 🌟 นี่คือ Error แท้จริงที่เราจะได้เห็นถ้ามีอะไรพัง!
         logging.getLogger("Neo4jOps").error(f"❌ Code Graph Search Error: {e}")
         return f"❌ Code Graph Search Error: {e}"

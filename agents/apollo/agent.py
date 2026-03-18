@@ -434,10 +434,10 @@ def ask_tech_lead(question: str) -> str:
         if not question_vector:
             return "❌ Failed to generate embedding for the question."
 
-        graph_results = search_code_graph(question_vector, top_k=3)
+        graph_results = search_code_graph(question_vector, question_text=question, top_k=5)
 
-        if "❌" in graph_results or not graph_results.strip():
-            return "❌ No code info found in knowledge base."
+        # if "❌" in graph_results or not graph_results.strip():
+        #     return "❌ No code info found in knowledge base."
 
         return f"💻 Relevant Code Context from Graph:\n{graph_results}"
     except Exception as e:
