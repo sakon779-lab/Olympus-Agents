@@ -51,6 +51,11 @@ try:
         ask_tech_lead,
         sync_codebase_to_graph
     )
+    # ✅ เพิ่ม Import ฟังก์ชันสาย QA เข้ามา
+    from core.tools.neo4j_ops import (
+        search_test_cases_by_vector,
+        get_ticket_automation_coverage
+    )
 except ImportError as e:
     print(f"❌ [DEBUG] Error importing Apollo components: {e}")
 
@@ -184,6 +189,35 @@ def consult_technical_architecture(question: str) -> str:
         return ask_tech_lead(question)
     except Exception as e:
         return f"❌ Tech Lead Error: {str(e)}"
+
+# ==============================================================================
+# 🧪 NEW QA TOOLS
+# ==============================================================================
+
+@mcp.tool()
+def consult_qa_test_cases(query_text: str) -> str:
+    """
+    Ask Apollo's QA Manager to find Test Cases or Test Scripts.
+    USE THIS TOOL FOR: Semantic search for QA test designs (CSV), Robot Framework scripts,
+    or finding test scenarios related to specific concepts (e.g., 'payment failure').
+    """
+    try:
+        return search_test_cases_by_vector(query_text)
+    except Exception as e:
+        return f"❌ QA Search Error: {str(e)}"
+
+@mcp.tool()
+def check_test_automation_coverage(issue_key: str) -> str:
+    """
+    Ask Apollo's QA Manager to check test automation coverage for a Jira Ticket.
+    USE THIS TOOL FOR: Knowing how many test cases exist and what percentage are automated (e.g., 'SCRUM-30').
+    """
+    try:
+        return get_ticket_automation_coverage(issue_key)
+    except Exception as e:
+        return f"❌ Coverage Check Error: {str(e)}"
+
+# ==============================================================================
 
 @mcp.tool()
 def sync_jira_ticket(issue_key: str) -> str:

@@ -12,7 +12,7 @@ import core.network_fix
 from core.llm_client import query_qwen
 from core.config import settings
 from core.tools.jira_ops import get_recently_updated_issues, get_jira_issue
-from core.tools.neo4j_ops import sync_ticket_to_graph, search_code_graph
+from core.tools.neo4j_ops import sync_ticket_to_graph, search_code_graph, search_test_cases_by_vector, get_ticket_automation_coverage
 
 from tools.sync_code_pipeline import run_full_sync_pipeline
 
@@ -452,7 +452,9 @@ TOOLS = {
     "ask_tech_lead": ask_tech_lead,
     "sync_ticket": sync_ticket_to_knowledge_base,
     "sync_recent_tickets": sync_recent_tickets,
-    "sync_recent_jira_to_graph": sync_recent_jira_to_graph
+    "sync_recent_jira_to_graph": sync_recent_jira_to_graph,
+    "search_test_cases_by_vector": search_test_cases_by_vector,
+    "get_ticket_automation_coverage": get_ticket_automation_coverage
 }
 
 
@@ -492,10 +494,14 @@ You are "Apollo", the Knowledge Guru & Data Analyst of Olympus.
 5. **CASE: User asks about SOURCE CODE / FUNCTIONS / DEPENDENCIES** 💻
    - Examples: "Which function connects to Jira?", "What calls create_dashboard?".
    - ✅ ACTION: Use `ask_tech_lead(question)`.
-   
+
 6. **CASE: User wants to UPDATE/SYNC CODEBASE ARCHITECTURE** 💻
    - Examples: "Sync the Payment API codebase to SCRUM-99", "อัปเดตโค้ดโฟลเดอร์นี้เข้า Epic SCRUM-45 ให้หน่อย".
    - ✅ ACTION: Use `sync_codebase_to_graph(epic_key, target_directory)`.
+
+7. **CASE: User asks about QA, TEST CASES, or AUTOMATION COVERAGE** 🧪
+   - Examples: "What is the test coverage for SCRUM-30?", "Find tests about payment failure", "หาเทสเคสเกี่ยวกับการล็อกอิน".
+   - ✅ ACTION: Use `search_test_cases_by_vector(query_text)` OR `get_ticket_automation_coverage(issue_key)`.
 
 *** ⚠️ RULES ***
 - Do NOT guess. If you need stats, ask the analyst.
@@ -526,10 +532,16 @@ You are equipped with a hybrid architecture. You must choose the correct tool ba
 6. `ask_tech_lead(question)`
    - Use: STRICTLY for queries about Source Code, Functions, Files, and Code Dependencies.
    - Keywords: "ฟังก์ชัน", "โค้ด", "ไฟล์", "เรียกใช้งาน", "code", "function", "file".
+7. `search_test_cases_by_vector(query_text)`
+   - Use: STRICTLY for finding QA Test Cases, Test Designs, or Robot Scripts using AI semantic search.
+   - Keywords: "test case", "test script", "ทดสอบ", "เทสเคส".
+8. `get_ticket_automation_coverage(issue_key)`
+   - Use: STRICTLY for checking the test automation progress or coverage percentage for a specific Jira ticket.
+   - Keywords: "coverage", "เปอร์เซ็นต์", "automate ไปกี่เคส".
+
 RESPONSE FORMAT (JSON ONLY):
 { "action": "tool_name", "args": { ... } }
 """
-
 
 # ==============================================================================
 # 🧩 HELPER: PARSERS (Standardized)

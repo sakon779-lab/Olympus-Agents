@@ -1,9 +1,17 @@
 import logging
 from neo4j import GraphDatabase
 from core.config import settings
+import json
+from core.llm_client import get_text_embedding
 
 logger = logging.getLogger("Neo4jOps")
 
+def get_neo4j_driver():
+    """Helper function สำหรับสร้าง Connection ไปยัง Neo4j"""
+    return GraphDatabase.driver(
+        settings.NEO4J_URI,
+        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+    )
 
 def search_knowledge_graph(question_embedding: list, top_k: int = 3) -> str:
     """ค้นหาข้อมูลจาก Neo4j ด้วย Vector Search และดึง Graph Context กลับมา"""
@@ -157,7 +165,6 @@ def sync_ticket_to_graph(ticket_data: dict) -> bool:
         logger.error(f"❌ Neo4j Ingestion Error: {e}")
         return False
 
-
 def search_code_graph(question_embedding: list, question_text: str = "", top_k: int = 5) -> str:
     """ค้นหาข้อมูลโครงสร้างโค้ดแบบ Hybrid (List Concatenation)"""
 
@@ -234,3 +241,80 @@ def search_code_graph(question_embedding: list, question_text: str = "", top_k: 
         # 🌟 นี่คือ Error แท้จริงที่เราจะได้เห็นถ้ามีอะไรพัง!
         logging.getLogger("Neo4jOps").error(f"❌ Code Graph Search Error: {e}")
         return f"❌ Code Graph Search Error: {e}"
+
+def search_test_cases_by_vector(query_text: str, top_k: int = 5) -> str:
+    """
+    ค้นหา Test Case และ Test Script ใน Graph ด้วย AI Vector Semantic Search
+    """
+    try:
+        query_embedding = get_text_embedding(query_text)
+
+        search_query = """
+        MATCH (tc:TestCase)
+        WHERE tc.embedding IS NOT NULL
+        WITH tc, vector.similarity.cosine(tc.embedding, $query_embedding) AS score
+        WHERE score > 0.60
+
+        OPTIONAL MATCH (ts:TestScript)-[:IMPLEMENTS]->(tc)
+
+        RETURN 
+            tc.tc_id AS tc_id, 
+            tc.title AS title, 
+            tc.is_automated AS is_automated,
+            ts.name AS robot_script,
+            score
+        ORDER BY score DESC
+        LIMIT $top_k
+        """
+
+        driver = get_neo4j_driver()  # สมมติว่าใน neo4j_ops.py มีฟังก์ชันนี้อยู่แล้ว
+        results = []
+        with driver.session() as session:
+            records = session.run(search_query, query_embedding=query_embedding, top_k=top_k)
+            for record in records:
+                results.append({
+                    "TestCase_ID": record["tc_id"],
+                    "Title": record["title"],
+                    "Automated": record["is_automated"],
+                    "Robot_Script": record["robot_script"] if record["robot_script"] else "None",
+                    "Match_Score": round(record["score"], 3)
+                })
+
+        if not results:
+            return json.dumps({"status": "Success", "message": "No relevant test cases found.", "data": []})
+
+        return json.dumps({"status": "Success", "data": results})
+
+    except Exception as e:
+        return json.dumps({"status": "Error", "message": str(e)})
+
+def get_ticket_automation_coverage(issue_key: str) -> str:
+    """
+    ตรวจสอบเปอร์เซ็นต์ Automation Coverage ของ Jira Ticket
+    """
+    query = """
+    MATCH (tc:TestCase)-[:VALIDATES]->(t:JiraTicket {issue_key: $issue_key})
+    WITH count(tc) AS total_cases,
+         sum(CASE WHEN tc.is_automated = true THEN 1 ELSE 0 END) AS automated_cases
+    RETURN 
+        total_cases, 
+        automated_cases,
+        (CASE WHEN total_cases = 0 THEN 0 ELSE (toFloat(automated_cases) / total_cases) * 100 END) AS coverage_percent
+    """
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(query, issue_key=issue_key).single()
+
+        if not record or record["total_cases"] == 0:
+            return json.dumps({"status": "Not Found", "message": f"No test cases designed for {issue_key} yet."})
+
+        return json.dumps({
+            "Issue": issue_key,
+            "Total_TestCases": record["total_cases"],
+            "Automated_Scripts": record["automated_cases"],
+            "Coverage_Percentage": f"{round(record['coverage_percent'], 2)}%"
+        })
+    except Exception as e:
+        return json.dumps({"status": "Error", "message": str(e)})
