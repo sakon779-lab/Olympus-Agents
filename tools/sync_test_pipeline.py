@@ -233,16 +233,56 @@ def sync_robot_pipeline(issue_key: str, robot_file_path: str) -> dict:
         driver.close()
 
 
+# if __name__ == "__main__":
+#     # Test Run
+#     test_csv_path = r"D:\Project\qa-automation-repo\test_designs\SCRUM-30.csv"
+
+#     print("Testing CSV Sync...")
+#     result_csv = sync_test_pipeline("SCRUM-30", test_csv_path)
+#     print(result_csv)
+
+#     # ถ้ามีไฟล์ .robot เอา Path มาใส่ทดสอบตรงนี้ได้เลยครับ
+#     test_robot_path = r"D:\Project\qa-automation-repo\tests\SCRUM-30.robot"
+#     print("Testing Robot Sync...")
+#     result_robot = sync_robot_pipeline("SCRUM-30", test_robot_path)
+#     print(result_robot)
+
 if __name__ == "__main__":
-    # Test Run
-    test_csv_path = r"D:\Project\qa-automation-repo\test_designs\SCRUM-30.csv"
+    import sys
+    import os
+    
+    # เช็คว่ามีการส่ง Path ของไฟล์มาให้หรือไม่
+    if len(sys.argv) < 2:
+        print("⚠️ Usage: python -m core.tools.sync_test_pipeline <file_path>")
+        print("Example: python -m core.tools.sync_test_pipeline D:\\QA\\SCRUM-30_checkout.robot")
+        sys.exit(1)
 
-    print("Testing CSV Sync...")
-    result_csv = sync_test_pipeline("SCRUM-30", test_csv_path)
-    print(result_csv)
-
-    # ถ้ามีไฟล์ .robot เอา Path มาใส่ทดสอบตรงนี้ได้เลยครับ
-    test_robot_path = r"D:\Project\qa-automation-repo\tests\SCRUM-30.robot"
-    print("Testing Robot Sync...")
-    result_robot = sync_robot_pipeline("SCRUM-30", test_robot_path)
-    print(result_robot)
+    file_path = sys.argv[1]
+    
+    # 1. แกะชื่อไฟล์ออกมาจาก Path (เช่น D:\QA\SCRUM-30_checkout.robot -> SCRUM-30_checkout.robot)
+    base_name = os.path.basename(file_path)
+    
+    # 2. ใช้ Regex นักสืบ ดึง Key ออกมา (ค้นหาตัวอักษรพิมพ์ใหญ่ ตามด้วยขีดและตัวเลข)
+    match = re.search(r'([A-Z]+-\d+)', base_name)
+    
+    if not match:
+        print(f"❌ Error: ไม่พบ Jira Ticket Key ในชื่อไฟล์ '{base_name}'")
+        print("กรุณาตั้งชื่อไฟล์ให้มีรหัสตั๋ว เช่น SCRUM-30_filename.robot")
+        sys.exit(1)
+        
+    issue_key = match.group(1) # จะได้คำว่า 'SCRUM-30'
+    print(f"🎯 Extracted Issue Key: {issue_key}")
+    
+    # 3. ตรวจสอบนามสกุลไฟล์ แล้วเรียกฟังก์ชันให้ถูกตัว
+    if file_path.lower().endswith('.csv'):
+        print(f"📊 Starting CSV Sync for {issue_key}...")
+        result = sync_test_pipeline(issue_key, file_path)
+        print(result)
+        
+    elif file_path.lower().endswith('.robot'):
+        print(f"🤖 Starting Robot Sync for {issue_key}...")
+        result = sync_robot_pipeline(issue_key, file_path)
+        print(result)
+        
+    else:
+        print(f"❌ Error: ไม่รองรับไฟล์นามสกุลนี้ ({file_path}) รองรับแค่ .csv และ .robot")
