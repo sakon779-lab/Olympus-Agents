@@ -57,7 +57,7 @@ try:
         get_ticket_automation_coverage
     )
     # ✅ เพิ่ม Import ฟังก์ชันสำหรับ single file sync
-    from tools.sync_code_pipeline import run_single_file_sync, run_recent_code_sync
+    from tools.sync_code_pipeline import run_code_file_sync, run_recent_code_sync
 except ImportError as e:
     print(f"❌ [DEBUG] Error importing Apollo components: {e}")
 
@@ -105,7 +105,7 @@ def background_worker(job_id: str, action_type: str, args: dict):
                 )
             elif action_type == "sync_code_file":
                 # รัน sync สำหรับ code file เดียว
-                result = run_single_file_sync(
+                result = run_code_file_sync(
                     file_path=args['file_path'],
                     epic_key=args.get('epic_key', "SCRUM-32")
                 )
@@ -308,7 +308,7 @@ def sync_code_file(file_path: str, epic_key: str = "SCRUM-32") -> str:
     # 🚀 ส่งงานเข้า Background Thread
     thread = threading.Thread(
         target=background_worker,
-        args=(job_id, "sync_single_file", {
+        args=(job_id, "sync_code_file", {
             "file_path": file_path,
             "epic_key": epic_key
         })

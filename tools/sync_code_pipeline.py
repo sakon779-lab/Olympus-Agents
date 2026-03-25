@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import logging
+import subprocess
 import core.network_fix
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from tools.code_summarizer import process_extracted_nodes
 from tools.code_to_graph import ingest_code_to_graph
 from tools.ai_auto_mapper import run_auto_mapper
 
-def run_single_file_sync(file_path: str, epic_key: str = "SCRUM-32") -> str:
+def run_code_file_sync(file_path: str, epic_key: str = "SCRUM-32") -> str:
     """รัน Sync Pipeline สำหรับ 'ไฟล์เดียว' (รองรับทั้ง CI/CD และ MCP)"""
     
     if not os.path.exists(file_path):
@@ -109,7 +110,7 @@ def run_recent_code_sync(repo_path: str, hours: int = 24, epic_key: str = "SCRUM
             # เช็คว่าไฟล์ยังมีอยู่จริง (ไม่ได้โดนลบทิ้งไปแล้ว)
             if os.path.exists(full_path):
                 logger.info(f"🚀 Triggering sync for: {full_path}")
-                run_single_file_sync(full_path, epic_key)
+                run_code_file_sync(full_path, epic_key)
                 success_count += 1
 
         return f"✅ Successfully synced {success_count} recently modified CODE files (Epic: {epic_key})."
@@ -208,14 +209,20 @@ if __name__ == "__main__":
 
     # 🌟 โหมดกวาดไฟล์ย้อนหลัง
     if sys.argv[1] == "--recent":
-        if len(sys.argv) < 4:
+        # เปลี่ยนเช็ค len เป็น < 3 เพราะอย่างน้อยต้องมี --recent กับ repo_path
+        if len(sys.argv) < 3:
             print("⚠️ Error: Missing arguments for --recent")
             print("Usage: python -m tools.sync_code_pipeline --recent <repo_path> <hours> [epic_key]")
             sys.exit(1)
             
         repo_path = sys.argv[2]
-        hours = int(sys.argv[3])
-        epic_key = sys.argv[4] if len(sys.argv) > 4 else "SCRUM-32"
+        
+        # 🌟 [FIX] ดักจับ hours ถ้า Jenkins ส่งมาเป็นค่าว่าง ("") ให้แปลงเป็น 24
+        hours_str = sys.argv[3] if len(sys.argv) > 3 else "24"
+        hours = int(hours_str) if hours_str.strip() else 24
+        
+        # 🌟 [FIX] ดักจับ epic_key ถ้า Jenkins ส่งมาเป็นค่าว่าง ("") ให้ใช้ SCRUM-32
+        epic_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4].strip() else "SCRUM-32"
         
         result = run_recent_code_sync(repo_path, hours, epic_key)
         print(result)
@@ -225,5 +232,5 @@ if __name__ == "__main__":
         target_file = sys.argv[1]
         epic_key = sys.argv[2] if len(sys.argv) > 2 else "SCRUM-32"
         
-        result = run_single_file_sync(target_file, epic_key)
+        result = run_code_file_sync(target_file, epic_key)
         print(result)
