@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 from neo4j import GraphDatabase
 import core.network_fix
@@ -11,15 +12,26 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("AutoMapper")
 
 
-def get_unmapped_code_nodes(session, epic_key="SCRUM-32"):
+def get_unmapped_code_nodes(session, epic_key: str, specific_file: str = None) -> list:
     """ดึง CodeNode ที่ยังไม่ได้ผูกกับตั๋วใบย่อยๆ (ยังไม่มีเส้น IMPLEMENTS)"""
-    query = """
+    
+    # 🌟 ผสมผสานท่าไม้ตาย Cypher ของคุณก๊อป เข้ากับ Dynamic Filtering
+    base_query = """
     MATCH (c:CodeNode)-[:BELONGS_TO]->(e:Ticket {id: $epic_key})
     WHERE NOT (c)-[:IMPLEMENTS]->(:Ticket)
     AND c.embedding IS NOT NULL
-    RETURN c.node_id AS node_id, c.name AS name, c.ai_summary AS summary, c.embedding AS embedding
     """
-    result = session.run(query, epic_key=epic_key)
+    
+    # ถ้ามีการระบุไฟล์เข้ามา ให้เพิ่มเงื่อนไข WHERE จำกัดเฉพาะไฟล์นั้น
+    if specific_file:
+        # 💡 แปลงเป็น Path มาตรฐาน (Windows/Linux ให้ตรงกัน)
+        normalized_path = specific_file.replace("\\", "/")
+        base_query += f"  AND c.file_path ENDS WITH '{os.path.basename(normalized_path)}'\n"
+        
+    base_query += " RETURN c.node_id AS node_id, c.name AS name, c.ai_summary AS summary, c.embedding AS embedding, c.file_path AS file_path"
+    
+    result = session.run(base_query, epic_key=epic_key)
+    # ใช้ท่า List Comprehension แบบคลีนๆ ตามที่คุณก๊อปเขียนมา
     return [record.data() for record in result]
 
 
@@ -104,49 +116,59 @@ def link_code_to_tickets(session, node_id, ticket_ids):
     session.run(query, node_id=node_id, ticket_ids=ticket_ids)
 
 
-def run_auto_mapper():
-    epic_key = "SCRUM-32"
+def run_auto_mapper(epic_key: str = "SCRUM-32", target_file: str = None):
     logger.info(f"🚀 เริ่มต้น AI Auto-Mapper สำหรับ Epic {epic_key}...")
+    if target_file:
+        logger.info(f"🎯 โหมด: ทำงานเฉพาะไฟล์เป้าหมาย -> {target_file}")
 
     driver = GraphDatabase.driver(
         settings.NEO4J_URI,
         auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
     )
 
-    with driver.session() as session:
-        # 1. ดึงโค้ดที่ยังเคว้งคว้าง
-        unmapped_nodes = get_unmapped_code_nodes(session, epic_key)
-        logger.info(f"🔍 พบ CodeNode ที่ยังไม่ได้จับคู่ {len(unmapped_nodes)} โหนด")
+    try:
+        with driver.session() as session:
+            # 1. ดึงโค้ดที่ยังเคว้งคว้าง (🌟 สำคัญ: ต้องส่ง specific_file=target_file ไปด้วย)
+            unmapped_nodes = get_unmapped_code_nodes(session, epic_key, specific_file=target_file)
+            
+            if not unmapped_nodes:
+                logger.info("🎉 ไม่มี CodeNode ที่ต้องการจับคู่ (หรือจับคู่ครบหมดแล้ว)")
+                return
+                
+            logger.info(f"🔍 พบ CodeNode ที่ยังไม่ได้จับคู่ {len(unmapped_nodes)} โหนด")
 
-        success_count = 0
+            success_count = 0
 
-        for i, node in enumerate(unmapped_nodes):
-            node_id = node['node_id']
-            name = node['name']
-            summary = node['summary']
-            embedding = node['embedding']
+            for i, node in enumerate(unmapped_nodes):
+                node_id = node['node_id']
+                name = node['name']
+                summary = node['summary']
+                embedding = node['embedding']
 
-            logger.info(f"\n🔄 [{i + 1}/{len(unmapped_nodes)}] กำลังวิเคราะห์โค้ด: {name}")
+                logger.info(f"\n🔄 [{i + 1}/{len(unmapped_nodes)}] กำลังวิเคราะห์โค้ด: {name}")
 
-            # 2. ค้นหา Candidate Tickets
-            candidates = find_candidate_tickets(session, embedding, top_k=4)
-            if not candidates:
-                logger.warning(f"⚠️ ไม่พบตั๋วที่ใกล้เคียงสำหรับ {name}")
-                continue
+                # 2. ค้นหา Candidate Tickets
+                candidates = find_candidate_tickets(session, embedding, top_k=4)
+                if not candidates:
+                    logger.warning(f"⚠️ ไม่พบตั๋วที่ใกล้เคียงสำหรับ {name}")
+                    continue
 
-            # 3. ให้ LLM ฟันธง
-            matched_tickets = ask_llm_to_match(name, summary, candidates)
+                # 3. ให้ LLM ฟันธง
+                matched_tickets = ask_llm_to_match(name, summary, candidates)
 
-            # 4. อัปเดตลง Graph
-            if matched_tickets:
-                logger.info(f"✅ AI จับคู่ {name} เข้ากับตั๋ว: {matched_tickets}")
-                link_code_to_tickets(session, node_id, matched_tickets)
-                success_count += 1
-            else:
-                logger.info(f"🤷 AI มองว่า {name} ไม่ตรงกับตั๋วใบไหนเลยใน Candidate")
+                # 4. อัปเดตลง Graph
+                if matched_tickets:
+                    logger.info(f"✅ AI จับคู่ {name} เข้ากับตั๋ว: {matched_tickets}")
+                    link_code_to_tickets(session, node_id, matched_tickets)
+                    success_count += 1
+                else:
+                    logger.info(f"🤷 AI มองว่า {name} ไม่ตรงกับตั๋วใบไหนเลยใน Candidate")
 
-    driver.close()
-    logger.info(f"\n🎉 Auto-Mapping เสร็จสิ้น! จับคู่สำเร็จ {success_count}/{len(unmapped_nodes)} โหนด")
+        logger.info(f"\n🎉 Auto-Mapping เสร็จสิ้น! จับคู่สำเร็จ {success_count}/{len(unmapped_nodes)} โหนด")
+    except Exception as e:
+        logger.error(f"❌ Error in Auto-Mapper: {e}")
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":

@@ -77,25 +77,41 @@ def parse_python_file(file_path, epic_key):
         return []
 
 
-def scan_codebase(root_dir: str, epic_key: str, exclude_dirs=None) -> list:
+def scan_codebase(target_path: str, epic_key: str, exclude_dirs=None) -> list:
     """
-    ฟังก์ชันหลักสำหรับวิ่งสแกนทั้งโฟลเดอร์โปรเจกต์
+    ฟังก์ชันหลักสำหรับวิ่งสแกนไฟล์เดี่ยว หรือ ทั้งโฟลเดอร์โปรเจกต์
     """
     if exclude_dirs is None:
         # โฟลเดอร์มาตรฐานที่ AI ไม่ควรอ่าน
         exclude_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules", ".idea", "chroma_db", "logs", "pg_data"}
 
+    files_to_parse = []
+    
+    # 🌟 1. เช็คเป้าหมายและรวบรวม "รายชื่อไฟล์" ที่ต้องอ่าน
+    if os.path.isfile(target_path):
+        # ถ้าเป็นไฟล์เดี่ยวๆ (เช่นรันจาก Jenkins หรือ Apollo)
+        files_to_parse.append(Path(target_path))
+    elif os.path.isdir(target_path):
+        # ถ้าเป็นโฟลเดอร์ (กวาดทั้งโปรเจกต์) ให้ใช้ rglob วนหาไฟล์ .py
+        root_path = Path(target_path)
+        for file_path in root_path.rglob("*.py"):
+            # เช็คว่าไฟล์อยู่ในโฟลเดอร์ที่ต้องข้ามหรือไม่
+            if any(excluded in file_path.parts for excluded in exclude_dirs):
+                continue
+            files_to_parse.append(file_path)
+    else:
+        logger.error(f"❌ Path not found: {target_path}")
+        return []
+
+    logger.info(f"🔍 เริ่มสแกนโค้ดเป้าหมาย: {target_path} (Epic: {epic_key})")
+
     all_extracted_nodes = []
-    root_path = Path(root_dir)
 
-    logger.info(f"🔍 เริ่มสแกนโค้ดในโฟลเดอร์: {root_path} (Epic: {epic_key})")
-
-    for file_path in root_path.rglob("*.py"):
-        # เช็คว่าไฟล์อยู่ในโฟลเดอร์ที่ต้องข้ามหรือไม่
-        if any(excluded in file_path.parts for excluded in exclude_dirs):
-            continue
-
-        logger.info(f"📄 กำลังอ่านไฟล์: {file_path.relative_to(root_path)}")
+    # 🌟 2. นำไฟล์ที่รวบรวมได้ ไปแกะโครงสร้าง (AST) ทีละไฟล์
+    for file_path in files_to_parse:
+        logger.info(f"📄 กำลังอ่านไฟล์: {file_path}")
+        
+        # ส่งไปให้ parse_python_file ของคุณก๊อปจัดการแกะเนื้อโค้ด
         extracted_nodes = parse_python_file(file_path, epic_key)
         all_extracted_nodes.extend(extracted_nodes)
 
