@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import socket
+import core.network_fix
 from core.config import settings
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
@@ -56,13 +57,20 @@ def get_text_embedding(text: str, model: str = None) -> list:
     target_model = model or getattr(settings, "EMBEDDING_MODEL", "nomic-embed-text")
 
     try:
-        # 🎯 2. ดึง URL ของเครื่อง Local จาก Config
+        # ดึง URL ของเครื่อง Local จาก Config
         local_ollama_url = getattr(settings, "OLLAMA_LOCAL_URL", "http://localhost:11434")
 
-        response = requests.post(
-            f"{local_ollama_url}/api/embed",
-            json={"model": target_model, "input": text, "options": {"num_ctx": 4096}}
+        # ตรวจสอบขนาดข้อความก่อนส่ง (ป้องกัน context length exceeded)
+        # nomic-embed-text รับได้สูงสุด 8192 chars (≈2048 tokens) ปลอดภัยสุด
+        if len(text) > 8192:
+            logger.warning(f"Text too long ({len(text)} chars), truncating to 8192 chars for nomic-embed-text")
+            text = text[:8192]
 
+        # ใช้ Session ที่ถูก patch ด้วย network_fix
+        session = requests.Session()
+        response = session.post(
+            f"{local_ollama_url}/api/embed",
+            json={"model": target_model, "input": text, "options": {"num_ctx": 2048}}
         )
 
         if response.status_code == 200:
