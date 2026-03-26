@@ -46,10 +46,14 @@ try:
     from agents.apollo.agent import (
         ask_guru,
         ask_database_analyst,
-        sync_ticket_to_knowledge_base,
-        sync_recent_tickets,
         ask_tech_lead,
         sync_codebase_to_graph
+    )
+    # ✅ Import Jira sync functions from tools
+    from tools.sync_jira_pipeline import (
+        sync_ticket_to_knowledge_base,
+        sync_recent_tickets,
+        sync_recent_jira_to_graph
     )
     # ✅ เพิ่ม Import ฟังก์ชันสาย QA เข้ามา
     from core.tools.neo4j_ops import (
