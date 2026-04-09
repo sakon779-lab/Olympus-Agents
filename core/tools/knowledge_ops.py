@@ -66,7 +66,14 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
 
         # [NEW] บันทึกค่าลงคอลัมน์ใหม่ใน Database
         knowledge.assignee = assignee
-        knowledge.story_point = story_point
+        # Handle story_point conversion safely
+        if story_point is None or story_point == '':
+            knowledge.story_point = None
+        else:
+            try:
+                knowledge.story_point = float(story_point)
+            except (ValueError, TypeError):
+                knowledge.story_point = None
         knowledge.epic_key = epic_key
         knowledge.epic_name = epic_name
 
