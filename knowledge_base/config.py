@@ -14,12 +14,14 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self):
-        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        # Handle empty port safely
+        port = self.DB_PORT if self.DB_PORT and str(self.DB_PORT).strip() else 5432
+        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{port}/{self.DB_NAME}"
 
     class Config:
         env_file = os.path.join(BASE_DIR, ".env")
         env_file_encoding = 'utf-8'
-        # ✅ เพิ่มบรรทัดนี้: บอกให้เมินตัวแปรอื่นๆ ใน .env ที่เราไม่ได้ประกาศ (เช่น JIRA_*)
+        # เพิ่มบรรทัดนี้: บอกให้เมินตัวแปรอื่นๆ ใน .env ที่เราไม่ได้ประกาศ (เช่น JIRA_*)
         extra = "ignore" 
 
 settings = Settings()
