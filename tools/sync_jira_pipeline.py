@@ -1,5 +1,13 @@
 """
 Jira Ticket Sync Pipeline Tools
+"""
+
+import sys
+import os
+# Add project root to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+"""
 รวบรวมฟังก์ชันที่เกี่ยวข้องกับการ sync Jira tickets จาก Apollo agent
 """
 
@@ -139,11 +147,11 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
 
     # เช็คว่า Error ไหม
     if not ticket_data or not ticket_data.get("success"):
-        return f"❌ Sync Failed: {ticket_data.get('error', 'Failed to fetch data from Jira')}"
+        return f" Sync Failed: {ticket_data.get('error', 'Failed to fetch data from Jira')}"
 
-    logger.info(f"🧠 Extracting knowledge via LLM for {issue_key}...")
+    logger.info(f" Extracting knowledge via LLM for {issue_key}...")
 
-    # ✅ Extract Variables สำหรับส่งให้ LLM
+    #  Extract Variables  for 
     raw_content = ticket_data["ai_content"]
     real_status = ticket_data["status"]
     real_type = ticket_data["issue_type"]
@@ -152,8 +160,19 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
     real_issue_links = ticket_data.get("issue_links")
     real_assignee = ticket_data.get("assignee")
     real_story_point = ticket_data.get("story_point")
+    real_epic_key = ticket_data.get("epic_key")
+    real_epic_name = ticket_data.get("epic_name")
+    
+    # [NEW] Fallback: Find root epic if epic_key is None
+    if not real_epic_key:
+        from core.tools.jira_ops import find_root_epic
+        real_epic_key = find_root_epic(ticket_data.get("issue_key"))
 
     # ใช้สมอง (Qwen) สรุปข้อมูล
+    # 🟢 [NEW] Update raw_content with resolved epic key
+    if real_epic_key:
+        raw_content = raw_content.replace(f"EPIC: None", f"EPIC: {real_epic_key}")
+    
     extraction_prompt = [
         {"role": "system", "content": """
         You are a Data Extractor parsing Jira ticket content into structured JSON.
@@ -162,8 +181,9 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         - status: The current status (e.g., To Do, Done).
         - business_logic: The core rules and requirements.
         - technical_spec: API endpoints, database changes, or technical constraints.
-        - test_scenarios: Acceptance criteria or test cases mentioned.
-        - issue_type: (Story, Bug, Task).
+        - test_scenarios: Test cases and validation requirements.
+        - issue_type: (Story, Bug, Task, Epic, Subtask).
+        - epic_key: The Epic this ticket belongs to (extract from EPIC: field).
 
         EXTRACT GRAPH ENTITIES (Crucial):
         - components: List of technical components/systems mentioned (e.g., ["Payment API", "PostgreSQL", "Frontend UI"]). Empty list if none.
@@ -230,6 +250,8 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             issue_links=real_issue_links,
             assignee=real_assignee,
             story_point=real_story_point,
+            epic_key=real_epic_key,
+            epic_name=real_epic_name,
             # ✅ โยนของใหม่ไปให้ท่อ Neo4j ด้านในทำต่อ
             ticket_data=ticket_data,
             extracted_data=data,
@@ -240,12 +262,12 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
         return f"✅ Sync Flow Completed for {issue_key}!\nDetails: {result}"
 
     except json.JSONDecodeError as je:
-        logger.error(f"❌ JSON Error: {je} \nRaw Text: {content_text}")
+        logger.error(f" JSON Error: {je} \nRaw Text: {content_text}")
         save_knowledge(
             issue_key=issue_key,
             summary=f"[AI Error] {real_summary}",
             status=real_status,
-            business_logic=f"⚠️ AI Parsing Failed. Raw Content:\n{raw_content[:2000]}",
+            business_logic=f" AI Parsing Failed. Raw Content:\n{raw_content[:2000]}",
             technical_spec="-",
             test_scenarios="-",
             issue_type=real_type,
@@ -253,10 +275,68 @@ def sync_ticket_to_knowledge_base(issue_key: str) -> str:
             issue_links=real_issue_links,
             assignee=real_assignee,
             story_point=real_story_point,
+            epic_key=real_epic_key,
+            epic_name=real_epic_name,
             ticket_data=ticket_data  # ส่งข้อมูลดิบไปให้รอดำเนินการทำ Graph ได้แม้ AI จะพัง
         )
-        return f"⚠️ Synced {issue_key} (Meta PostgREST OK, but AI Analysis failed). Saved raw content."
+        return f" Synced {issue_key} (Meta PostgREST OK, but AI Analysis failed). Saved raw content."
 
     except Exception as e:
-        logger.error(f"❌ General Error: {e}")
-        return f"❌ Sync Failed at pipeline step: {e}"
+        logger.error(f" General Error: {e}")
+        save_knowledge(
+            issue_key=issue_key,
+            summary=f"[Error] {real_summary}",
+            status=real_status,
+            business_logic=f" Error Occurred. Raw Content:\n{raw_content[:2000]}",
+            technical_spec="-",
+            test_scenarios="-",
+            issue_type=real_type,
+            parent_key=real_parent_key,
+            issue_links=real_issue_links,
+            assignee=real_assignee,
+            story_point=real_story_point,
+            epic_key=real_epic_key,
+            epic_name=real_epic_name,
+            ticket_data=ticket_data  # ส่งข้อมูลดิบไปให้รอดำเนินการทำ Graph ได้แม้ AI จะพัง
+        )
+        return f" Synced {issue_key} (Meta PostgREST OK, but an error occurred). Saved raw content."
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # 1.  Validate and parse command line arguments
+    if len(sys.argv) > 1:
+        try:
+            hours = int(sys.argv[1])
+            if hours < 1:
+                print("Error: LOOKBACK_HOURS must be greater than 0")
+                sys.exit(1)
+        except ValueError:
+            print("Error: LOOKBACK_HOURS must be a valid number")
+            sys.exit(1)
+    else:
+        hours = 24
+    
+    # 2.  Display start message
+    print(f"Jira Sync Pipeline: Starting sync for the last {hours} hours...")
+    from datetime import datetime
+    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 3.  Execute main sync function
+    try:
+        result = sync_recent_tickets(hours)
+        print(result)
+        
+        # 4.  Provide clear completion status
+        if "No tickets were updated" in result:
+            print("STATUS: No sync needed - all tickets up to date")
+        elif "Sync Complete" in result:
+            print("STATUS: Sync completed successfully")
+        else:
+            print("STATUS: Sync completed with warnings")
+            
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        print(f"CRITICAL ERROR: {e}")
+        sys.exit(1)

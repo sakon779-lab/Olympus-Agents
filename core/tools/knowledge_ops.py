@@ -31,11 +31,11 @@ def get_knowledge_from_sql(issue_key: str) -> str:
     finally:
         session.close()
 
-# ✅ เพิ่ม parameter: issue_type (default="Task")
-# ✅ เพิ่ม parameter: issue_type (default="Task") และ assignee, story_point
+# เพิ่ม parameter: issue_type (default="Task")
+# เพิ่ม parameter: issue_type (default="Task") และ assignee, story_point
 def save_knowledge(issue_key: str, summary: str, status: str, business_logic: str, technical_spec: Any,
                    test_scenarios: Any, issue_type: str = "Task", parent_key=None, issue_links=None,
-                   assignee: str = None, story_point: float = None,  # 🟢 [NEW] รับค่า 2 ตัวใหม่
+                   assignee: str = None, story_point: float = None, epic_key: str = None, epic_name: str = None,  #  [NEW]  4  in 
                    ticket_data: dict = None, extracted_data: dict = None, embedding_vector: list = None,
                    raw_text: str = None) -> str:
     """
@@ -64,15 +64,17 @@ def save_knowledge(issue_key: str, summary: str, status: str, business_logic: st
         knowledge.technical_spec = str(technical_spec)
         knowledge.test_scenarios = str(test_scenarios)
 
-        # 🟢 [NEW] บันทึกค่าลงคอลัมน์ใหม่ใน Database
+        # [NEW] บันทึกค่าลงคอลัมน์ใหม่ใน Database
         knowledge.assignee = assignee
         knowledge.story_point = story_point
+        knowledge.epic_key = epic_key
+        knowledge.epic_name = epic_name
 
         session.add(knowledge)
         session.commit()
 
         # ==========================================
-        # 🕸️ 2. Update Graph & Vector (Neo4j) - แทนที่ ChromaDB
+        # 2. Update Graph & Vector (Neo4j) - แทนที่ ChromaDB
         # ==========================================
         from core.tools.neo4j_ops import sync_ticket_to_graph, sync_unstructured_to_graph
 
