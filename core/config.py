@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
 
     # --- 🎫 JIRA ---
-    JIRA_URL: str = ""
-    JIRA_EMAIL: str = ""
-    JIRA_API_TOKEN: str = ""
+    JIRA_URL: str = os.getenv("JIRA_URL", "")
+    JIRA_EMAIL: str = os.getenv("JIRA_EMAIL", "")
+    JIRA_API_TOKEN: str = os.getenv("JIRA_API_TOKEN", "")
 
     # --- 📊 GRAFANA ---
     GRAFANA_URL: str = os.getenv("GRAFANA_URL", "http://localhost:3000")
@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://9gjwsbc50f6jyt-11434.proxy.runpod.net")
 
     # แนะนำใช้ 7b ถ้าเครื่อง RAM น้อย หรือ 14b ถ้าเครื่องแรง
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5-coder:32b")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen3-coder:30b")
 
     # AI Temperature (0.0 = แม่นยำ/coding, 0.7 = ความคิดสร้างสรรค์)
     TEMPERATURE: float = 0.2

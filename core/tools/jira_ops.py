@@ -6,6 +6,39 @@ from core.config import settings
 logger = logging.getLogger("JiraOps")
 
 
+def find_root_epic(issue_key: str, max_depth: int = 5) -> str | None:
+    """
+    Traverse up Jira parent hierarchy to find root Epic.
+    """
+    current_key = issue_key
+    depth = 0
+    
+    while current_key and depth < max_depth:
+        # Fetch data for current issue
+        result = get_jira_issue(current_key)
+        
+        # Break if fetch fails or no result
+        if not result or not result.get('success'):
+            break
+            
+        # 1. Is current issue Epic?
+        if result.get('issue_type') == 'Epic':
+            return current_key
+            
+        # 2. If not, get parent key to check in next iteration
+        parent_key = result.get('parent_key')
+        
+        # Break if there is no parent (reached top without finding an Epic)
+        if not parent_key:
+            break
+            
+        # Move up to parent
+        current_key = parent_key
+        depth += 1
+        
+    return None # Epic not found within max_depth
+
+
 def get_recently_updated_issues(hours: int = 24) -> list:
     """
     กวาดรายชื่อ Issue Key ที่มีการอัปเดตในช่วง N ชั่วโมงที่ผ่านมา โดยใช้ JQL
@@ -98,6 +131,14 @@ def get_jira_issue(issue_key: str) -> dict:
             except ValueError:
                 story_point = None
 
+            # 🟢 [NEW] 1.3 Extract Epic Link
+            # Epic Link มักจะอยู่ใน customfield_10011
+            epic_obj = fields.get('customfield_10011') or {}
+            epic_key = epic_obj.get('key') if isinstance(epic_obj, dict) else None
+            
+            # ดึง Epic Name ด้วย (customfield_10014)
+            epic_name = fields.get('customfield_10014')
+
             # 2. Extract Issue Links
             raw_links = fields.get('issuelinks', [])
             formatted_links = []
@@ -123,7 +164,7 @@ def get_jira_issue(issue_key: str) -> dict:
             links_text_for_ai = ", ".join(
                 [f"{l['type']} {l['target']}" for l in formatted_links]) if formatted_links else "None"
 
-            # ✅ เพิ่ม ASSIGNEE และ STORY POINTS ให้ AI อ่านด้วย เผื่อมันใช้วิเคราะห์ Load งานได้
+            # ✅ เพิ่ม ASSIGNEE, STORY POINTS และ EPIC ให้ AI อ่านด้วย
             ai_context_text = (
                 f"TICKET: {issue_key}\n"
                 f"SUMMARY: {summary}\n"
@@ -132,6 +173,7 @@ def get_jira_issue(issue_key: str) -> dict:
                 f"ASSIGNEE: {assignee}\n"
                 f"STORY POINTS: {story_point if story_point is not None else 'None'}\n"
                 f"PARENT: {parent_key if parent_key else 'None'}\n"
+                f"EPIC: {epic_key if epic_key else 'None'}\n"
                 f"LINKS: {links_text_for_ai}\n"
                 f"REQUIREMENTS: {description_adf}"
             )
@@ -148,6 +190,8 @@ def get_jira_issue(issue_key: str) -> dict:
                 "issue_links": formatted_links,
                 "assignee": assignee,  # ✅ ส่งกลับไปให้ Database
                 "story_point": story_point,  # ✅ ส่งกลับไปให้ Database
+                "epic_key": epic_key,  # ✅ ส่ง Epic Key กลับไปให้ Database
+                "epic_name": epic_name,  # ✅ ส่ง Epic Name กลับไปให้ Database
                 "ai_content": ai_context_text
             }
         else:
