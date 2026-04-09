@@ -517,10 +517,13 @@ def run_recent_code_sync(repo_path: str, hours: int = 24, epic_key: str = "SCRUM
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         valid_extensions = ('.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.cs', '.go')
+        exclude_patterns = ['venv/', '.venv/', '__pycache__/', 'node_modules/', '.git/']
         
         changed_files = list(set([
             f.strip() for f in result.stdout.split('\n') 
-            if f.strip().endswith(valid_extensions)
+            if f.strip().endswith(valid_extensions) 
+            and not any(f.strip().startswith(pattern) for pattern in exclude_patterns)
+            and not any(exclude in f.strip() for exclude in ['venv', '__pycache__', 'node_modules'])
         ]))
 
         if not changed_files:
