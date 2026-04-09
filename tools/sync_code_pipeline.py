@@ -586,7 +586,10 @@ if __name__ == "__main__":
             
         repo_path = sys.argv[2]
         hours_str = sys.argv[3] if len(sys.argv) > 3 else "24"
-        hours = int(hours_str) if hours_str.strip() else 24
+        try:
+            hours = int(hours_str) if hours_str.strip() else 24
+        except (ValueError, TypeError):
+            hours = 24
         epic_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4].strip() else "SCRUM-32"
         
         result = run_recent_code_sync(repo_path, hours, epic_key)

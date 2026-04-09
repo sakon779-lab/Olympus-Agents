@@ -124,7 +124,9 @@ def sync_recent_tickets(hours: int = 24) -> str:
             status = sync_ticket_to_knowledge_base(key)
             sync_results.append(f"- {key}: {status}")
         except Exception as e:
+            import traceback
             logger.error(f"❌ Failed to sync {key}: {e}")
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             sync_results.append(f"- {key}: FAILED (Error: {str(e)})")
 
     return f"🚀 Sync Complete for the last {hours}h:\n" + "\n".join(sync_results)
