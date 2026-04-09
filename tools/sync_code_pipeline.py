@@ -84,7 +84,7 @@ def parse_python_file(file_path, epic_key):
 
 def scan_codebase(target_path: str, epic_key: str, exclude_dirs=None) -> list:
     if exclude_dirs is None:
-        exclude_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules", ".idea", "chroma_db", "logs", "pg_data"}
+        exclude_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules", ".idea", "chroma_db", "logs", "pg_data", "Lib", "site-packages"}
 
     files_to_parse = []
     
