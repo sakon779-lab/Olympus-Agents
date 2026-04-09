@@ -113,11 +113,11 @@ def get_jira_issue(issue_key: str) -> dict:
             issue_type = type_obj.get('name', 'Task') if isinstance(type_obj, dict) else str(type_obj)
 
             parent_obj = fields.get('parent') or {}
-            parent_key = parent_obj.get('key') if isinstance(parent_obj, dict) else None
+            parent_key = parent_obj.get('key') if isinstance(parent_obj, dict) and parent_obj.get('key') else None
 
             # 🟢 [NEW] 1.1 Extract Assignee
             assignee_obj = fields.get('assignee') or {}
-            assignee = assignee_obj.get('displayName', 'Unassigned')
+            assignee = assignee_obj.get('displayName', 'Unassigned') if isinstance(assignee_obj, dict) else 'Unassigned'
 
             # 🟢 [NEW] 1.2 Extract Story Points
             # Jira มักจะซ่อน Story Point ไว้ใน customfield (ส่วนใหญ่คือ 10016 หรือ 10026)
@@ -127,8 +127,12 @@ def get_jira_issue(issue_key: str) -> dict:
                     fields.get('storyPoints')  # กรณีใช้ plugin บางตัว
             )
             try:
-                story_point = float(story_point_raw) if story_point_raw is not None else None
-            except ValueError:
+                # Handle empty string, None, or invalid values
+                if story_point_raw is None or story_point_raw == '':
+                    story_point = None
+                else:
+                    story_point = float(story_point_raw)
+            except (ValueError, TypeError):
                 story_point = None
 
             # 🟢 [NEW] 1.3 Extract Epic Link
@@ -138,6 +142,7 @@ def get_jira_issue(issue_key: str) -> dict:
             
             # ดึง Epic Name ด้วย (customfield_10014)
             epic_name = fields.get('customfield_10014')
+            epic_name = epic_name if epic_name and epic_name.strip() else None
 
             # 2. Extract Issue Links
             raw_links = fields.get('issuelinks', [])
